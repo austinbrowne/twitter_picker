@@ -28,7 +28,7 @@ A free, open-source Chrome extension for picking Twitter/X giveaway winners. No 
 
 - **Collect Retweeters** - Auto-scrolls and captures all users who retweeted
 - **Collect Likers** - Auto-scrolls and captures all users who liked
-- **Verify Follows** - Check followers of multiple accounts simultaneously
+- **Verify Follows** - Validates winners follow required accounts at pick time
 - **Find Intersection** - Only users who meet ALL requirements are eligible
 - **Bot Filtering** - Filter by followers, tweets, account age, profile picture
 - **Cryptographic Random** - Uses `crypto.getRandomValues()` for provably fair selection
@@ -87,9 +87,8 @@ Click **"Collect All Data"** - the extension will automatically:
 
 1. Navigate to the Retweets page and scroll to collect all retweeters
 2. Navigate to the Likes page and scroll to collect all likers
-3. Navigate to each required account's followers page
 
-> **Note**: The popup closes during navigation. Re-open it to see progress and continue.
+> **Note**: The popup closes during navigation. Re-open it to see progress. Follower verification happens automatically when picking winners.
 
 ### Step 5: Configure Filters & Pick Winners
 
@@ -124,10 +123,10 @@ Filter out suspicious accounts with configurable rules:
 
 | Filter | Default | Description |
 |--------|---------|-------------|
-| Min Followers | 10 | Accounts must have at least this many followers |
-| Min Tweets | 5 | Accounts must have posted at least this many tweets |
-| Min Account Age | 30 days | Accounts must be at least this old |
-| Profile Picture | Required | Accounts must have a custom profile picture |
+| Min Followers | 0 | Accounts must have at least this many followers |
+| Min Tweets | 0 | Accounts must have posted at least this many tweets |
+| Min Account Age | 0 days | Accounts must be at least this old |
+| Profile Picture | Off | Require accounts to have a custom profile picture |
 
 ## Security
 

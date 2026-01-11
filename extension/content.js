@@ -1,16 +1,15 @@
 /**
  * Content script - runs on Twitter/X pages
- * Intercepts API responses and collects user data
+ * Receives API responses from injected.js and collects user data
  *
- * Security: Uses specific origin for postMessage, validates sources
+ * Security: Validates message origin and structure
  * State: Persists data to chrome.storage to survive navigation
  */
 
 (function() {
   'use strict';
 
-  // Unique message key to prevent spoofing
-  const MESSAGE_KEY = 'TWITTER_PICKER_' + Math.random().toString(36).slice(2);
+  const MESSAGE_TYPE = 'TWITTER_PICKER_API_RESPONSE';
 
   // Buffer for API responses received before we know if we're collecting
   const responseBuffer = [];
@@ -28,73 +27,15 @@
     collectionMutex: false
   };
 
-  // Inject script FIRST - before any async operations
-  // This ensures we capture API calls from the very start
   const currentOrigin = window.location.origin;
-  const injectedScript = document.createElement('script');
-  injectedScript.textContent = `
-    (function() {
-      const MESSAGE_KEY = '${MESSAGE_KEY}';
-      const ORIGIN = '${currentOrigin}';
 
-      const originalFetch = window.fetch;
-      window.fetch = async function(...args) {
-        const response = await originalFetch.apply(this, args);
-        const url = args[0]?.url || args[0];
-
-        if (typeof url === 'string' && (url.includes('/graphql/') || url.includes('/2/'))) {
-          try {
-            const clone = response.clone();
-            const data = await clone.json();
-            window.postMessage({
-              type: MESSAGE_KEY,
-              url: url,
-              data: data
-            }, ORIGIN);
-          } catch (e) {
-            // JSON parse error - not a JSON response
-          }
-        }
-
-        return response;
-      };
-
-      const originalXHR = XMLHttpRequest.prototype.open;
-      XMLHttpRequest.prototype.open = function(method, url) {
-        this._url = url;
-        return originalXHR.apply(this, arguments);
-      };
-
-      const originalSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.send = function() {
-        this.addEventListener('load', function() {
-          if (this._url && (this._url.includes('/graphql/') || this._url.includes('/2/'))) {
-            try {
-              const data = JSON.parse(this.responseText);
-              window.postMessage({
-                type: MESSAGE_KEY,
-                url: this._url,
-                data: data
-              }, ORIGIN);
-            } catch (e) {
-              // JSON parse error
-            }
-          }
-        });
-        return originalSend.apply(this, arguments);
-      };
-    })();
-  `;
-  document.documentElement.appendChild(injectedScript);
-  injectedScript.remove();
-
-  // Listen for intercepted API responses - start immediately, buffer until ready
+  // Listen for intercepted API responses from injected.js
   window.addEventListener('message', (event) => {
     // Security: Validate origin
     if (event.origin !== currentOrigin) return;
 
-    // Security: Validate message key
-    if (event.data?.type !== MESSAGE_KEY) return;
+    // Security: Validate message type
+    if (event.data?.type !== MESSAGE_TYPE) return;
 
     // Security: Validate data structure
     if (typeof event.data.url !== 'string' || typeof event.data.data !== 'object') return;
@@ -111,8 +52,6 @@
   // Process buffered responses once we're ready
   function processBuffer() {
     if (!collectedData.isCollecting) return;
-
-    console.log('[Twitter Picker] Processing', responseBuffer.length, 'buffered responses');
 
     while (responseBuffer.length > 0) {
       const { url, data } = responseBuffer.shift();
@@ -142,8 +81,6 @@
           if (type === 'followers' && path.includes('/followers')) isCorrectPage = true;
 
           if (isCorrectPage) {
-            console.log('[Twitter Picker] Resuming collection:', type);
-
             // Set collecting state BEFORE marking as initialized
             collectedData.isCollecting = true;
             collectedData.collectType = type;
@@ -181,7 +118,6 @@
 
       // If we're collecting, start auto-scroll after a short delay
       if (collectedData.isCollecting) {
-        console.log('[Twitter Picker] Starting auto-scroll for', collectedData.collectType);
         await sleep(1500);
         await autoScroll();
         await finishCollection();
@@ -196,11 +132,23 @@
   // Start initialization
   initialize();
 
-  // Save data to storage (debounced)
+  // Warn user before navigating away during collection
+  window.addEventListener('beforeunload', (event) => {
+    if (collectedData.isCollecting) {
+      // Standard way to show browser's default "are you sure?" dialog
+      event.preventDefault();
+      // Chrome requires returnValue to be set
+      event.returnValue = '';
+      return '';
+    }
+  });
+
+  // Save data to storage (debounced with longer interval to reduce I/O)
   let saveTimeout = null;
+  let lastSaveError = null;
   function saveToStorage() {
     if (saveTimeout) clearTimeout(saveTimeout);
-    saveTimeout = setTimeout(() => {
+    saveTimeout = setTimeout(async () => {
       const dataToSave = {
         retweeters: Array.from(collectedData.retweeters.values()),
         likers: Array.from(collectedData.likers.values()),
@@ -209,8 +157,22 @@
         ),
         currentTweetId: collectedData.currentTweetId
       };
-      chrome.storage.local.set({ collectedData: dataToSave }).catch(() => {});
-    }, 300);
+      try {
+        await chrome.storage.local.set({ collectedData: dataToSave });
+        lastSaveError = null;
+      } catch (e) {
+        // Only log once per error to avoid spam
+        if (lastSaveError !== e.message) {
+          lastSaveError = e.message;
+          console.error('[Twitter Picker] Storage save failed:', e.message);
+          // Notify popup of storage error
+          chrome.runtime.sendMessage({
+            type: 'STORAGE_ERROR',
+            error: e.message
+          }).catch(() => {});
+        }
+      }
+    }, 1000); // Increased from 300ms to 1000ms to reduce I/O
   }
 
   function handleApiResponse(url, data) {
@@ -221,8 +183,6 @@
     const users = extractUsers(data, [], 0, 50);
 
     if (users.length > 0) {
-      console.log('[Twitter Picker] Found', users.length, 'users in response');
-
       const targetMap = getTargetMap();
       if (targetMap) {
         let added = 0;
@@ -233,7 +193,6 @@
           }
         });
         if (added > 0) {
-          console.log('[Twitter Picker] Added', added, 'new users, total:', targetMap.size);
           saveToStorage();
           updateProgress();
         }
@@ -263,13 +222,19 @@
   }
 
   // Extract user objects with depth limit to prevent stack overflow
-  function extractUsers(data, users = [], depth = 0, maxDepth = 50) {
+  // Uses Set for O(1) duplicate checking instead of O(n) findIndex
+  function extractUsers(data, users = [], depth = 0, maxDepth = 50, seenUsernames = null) {
+    // Initialize Set on first call for O(1) duplicate checking
+    if (seenUsernames === null) {
+      seenUsernames = new Set(users.map(u => u.username.toLowerCase()));
+    }
+
     if (depth > maxDepth) return users;
     if (!data || typeof data !== 'object') return users;
 
     // Check for user result wrapper (common in Twitter's GraphQL responses)
     if (data.user_results?.result) {
-      extractUsers(data.user_results.result, users, depth + 1, maxDepth);
+      extractUsers(data.user_results.result, users, depth + 1, maxDepth, seenUsernames);
     }
 
     // Check if this is a user object - multiple patterns Twitter uses
@@ -281,26 +246,20 @@
       (data.screen_name && (data.id_str || data.id));
 
     if (isUserObject) {
-      const legacy = data.legacy || data;
-      const username = legacy.screen_name || data.screen_name;
+      // Twitter uses different structures: legacy (old), core (new), or flat
+      const legacy = data.legacy || {};
+      const core = data.core || {};
+
+      const username = legacy.screen_name || core.screen_name || data.screen_name;
 
       // Security: Validate and sanitize username
       if (username && typeof username === 'string' && /^[a-zA-Z0-9_]{1,15}$/.test(username)) {
-        // Avoid duplicates within this extraction
-        const existingIndex = users.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
-        if (existingIndex === -1) {
-          const user = {
-            id: String(data.rest_id || data.id_str || data.id || ''),
-            username: username,
-            displayName: sanitizeString(legacy.name || data.name),
-            avatarUrl: sanitizeUrl(legacy.profile_image_url_https || data.profile_image_url_https),
-            bio: sanitizeString(legacy.description || data.description),
-            followerCount: sanitizeNumber(legacy.followers_count ?? data.followers_count),
-            followingCount: sanitizeNumber(legacy.friends_count ?? data.friends_count),
-            tweetCount: sanitizeNumber(legacy.statuses_count ?? data.statuses_count),
-            isVerified: Boolean(legacy.verified || data.verified || data.is_blue_verified),
-            createdAt: sanitizeString(legacy.created_at || data.created_at)
-          };
+        const usernameLower = username.toLowerCase();
+        // O(1) duplicate check using Set
+        if (!seenUsernames.has(usernameLower)) {
+          seenUsernames.add(usernameLower);
+
+          const user = buildUserObject(data, legacy, core, username);
           users.push(user);
         }
       }
@@ -309,19 +268,46 @@
     // Recursively search nested objects
     if (Array.isArray(data)) {
       for (const item of data) {
-        extractUsers(item, users, depth + 1, maxDepth);
+        extractUsers(item, users, depth + 1, maxDepth, seenUsernames);
         if (users.length > 10000) break; // Memory safety limit
       }
     } else {
       for (const value of Object.values(data)) {
         if (value && typeof value === 'object') {
-          extractUsers(value, users, depth + 1, maxDepth);
+          extractUsers(value, users, depth + 1, maxDepth, seenUsernames);
           if (users.length > 10000) break;
         }
       }
     }
 
     return users;
+  }
+
+  // Build user object from Twitter API data (extracted for cleaner code)
+  function buildUserObject(data, legacy, core, username) {
+    // Extract avatar from multiple possible locations
+    const avatarUrl = legacy.profile_image_url_https ||
+                     data.profile_image_url_https ||
+                     data.avatar?.image_url ||
+                     core.avatar?.image_url;
+
+    // Extract created_at from multiple possible locations
+    const createdAt = legacy.created_at ||
+                     data.created_at ||
+                     core.created_at;
+
+    return {
+      id: String(data.rest_id || data.id_str || data.id || ''),
+      username: username,
+      displayName: sanitizeString(legacy.name || core.name || data.name),
+      avatarUrl: sanitizeUrl(avatarUrl),
+      bio: sanitizeString(legacy.description || core.description || data.description),
+      followerCount: sanitizeNumber(legacy.followers_count ?? core.followers_count ?? data.followers_count),
+      followingCount: sanitizeNumber(legacy.friends_count ?? core.friends_count ?? data.friends_count),
+      tweetCount: sanitizeNumber(legacy.statuses_count ?? core.statuses_count ?? data.statuses_count),
+      isVerified: Boolean(legacy.verified || data.verified || data.is_blue_verified),
+      createdAt: sanitizeString(createdAt)
+    };
   }
 
   // Security: Sanitize string input
@@ -331,12 +317,17 @@
     return str.replace(/<[^>]*>/g, '').slice(0, 500);
   }
 
-  // Security: Validate URL
+  // Security: Validate URL with exact hostname matching
   function sanitizeUrl(url) {
     if (typeof url !== 'string') return undefined;
     try {
       const parsed = new URL(url);
-      if (parsed.protocol === 'https:' && (parsed.hostname.includes('twimg.com') || parsed.hostname.includes('pbs.twimg.com'))) {
+      // Use exact hostname match or proper subdomain check
+      const validHosts = ['twimg.com', 'pbs.twimg.com', 'abs.twimg.com'];
+      const hostname = parsed.hostname;
+      const isValidHost = validHosts.includes(hostname) ||
+                         hostname.endsWith('.twimg.com');
+      if (parsed.protocol === 'https:' && isValidHost) {
         return url;
       }
     } catch (e) {}
@@ -369,8 +360,6 @@
     let lastUserCount = getTargetMap()?.size || 0;
     let noNewUsersCount = 0;
 
-    console.log('[Twitter Picker] Starting auto-scroll, max:', maxScrolls);
-
     while (scrollCount < maxScrolls && collectedData.isCollecting) {
       // Scroll down
       window.scrollTo(0, document.body.scrollHeight);
@@ -399,14 +388,8 @@
       lastHeight = newHeight;
       scrollCount++;
 
-      // Log progress
-      if (scrollCount % 10 === 0) {
-        console.log('[Twitter Picker] Scroll', scrollCount, '- Users:', currentUserCount);
-      }
-
       // Stop if no new content for a while
       if (noChangeCount >= 5 && noNewUsersCount >= 5) {
-        console.log('[Twitter Picker] No new content, stopping scroll');
         break;
       }
 
@@ -415,12 +398,31 @@
         updateProgress();
       }
     }
-
-    console.log('[Twitter Picker] Auto-scroll complete, total scrolls:', scrollCount);
   }
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Fetch with timeout to prevent hanging requests
+  async function fetchWithTimeout(url, options = {}, timeout = 15000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      return response;
+    } catch (e) {
+      clearTimeout(timeoutId);
+      if (e.name === 'AbortError') {
+        throw new Error('Request timed out');
+      }
+      throw e;
+    }
   }
 
   function getCurrentTweetId() {
@@ -432,8 +434,6 @@
     const type = collectedData.collectType;
     const account = collectedData.currentFollowAccount;
     const count = getTargetMap()?.size || 0;
-
-    console.log('[Twitter Picker] Collection complete:', type, '- Count:', count);
 
     collectedData.isCollecting = false;
     collectedData.collectionMutex = false;
@@ -484,15 +484,12 @@
         }
       });
 
-      console.log('[Twitter Picker] Navigating to:', targetUrl);
-
       if (targetUrl && window.location.href !== targetUrl) {
         window.location.href = targetUrl;
         return { success: true, navigating: true };
       }
 
       // We're already on the right page, start collecting
-      console.log('[Twitter Picker] Already on correct page, starting collection');
       await sleep(1500);
       await autoScroll();
       await finishCollection();
@@ -501,7 +498,6 @@
       return { success: true, count };
 
     } catch (error) {
-      console.error('[Twitter Picker] Collection error:', error);
       collectedData.isCollecting = false;
       collectedData.collectionMutex = false;
       return { success: false, error: error.message };
@@ -585,10 +581,179 @@
         });
         break;
 
+      case 'CHECK_FOLLOWS':
+        // Check if a user follows all required accounts
+        if (!message.username || !Array.isArray(message.requiredAccounts)) {
+          sendResponse({ followsAll: false, error: 'Invalid parameters' });
+          break;
+        }
+        checkUserFollowsAccounts(message.username, message.requiredAccounts)
+          .then(result => sendResponse(result))
+          .catch(e => sendResponse({ followsAll: false, error: e.message }));
+        return true; // Keep channel open for async response
+
       default:
         sendResponse({ success: false, error: 'Unknown message type' });
     }
     return true;
   });
+
+  // Check if a user follows all the required accounts
+  async function checkUserFollowsAccounts(username, requiredAccounts) {
+    try {
+      // Fetch the user's following list using Twitter's internal API
+      const following = await fetchUserFollowing(username);
+      const followingSet = new Set(following.map(u => u.toLowerCase()));
+
+      // Check if all required accounts are in their following list
+      const results = {};
+      let followsAll = true;
+
+      for (const account of requiredAccounts) {
+        const follows = followingSet.has(account.toLowerCase());
+        results[account] = follows;
+        if (!follows) {
+          followsAll = false;
+        }
+      }
+
+      return { followsAll, results };
+
+    } catch (e) {
+      return { followsAll: false, error: e.message };
+    }
+  }
+
+  // Fetch a user's following list using Twitter's GraphQL API
+  async function fetchUserFollowing(username) {
+    // First, get the user's ID
+    const userInfo = await fetchUserByScreenName(username);
+    if (!userInfo?.rest_id) {
+      throw new Error('Could not find user: ' + username);
+    }
+
+    const userId = userInfo.rest_id;
+    const following = [];
+
+    // Fetch following list (first page should be enough for verification)
+    // We only need to check if specific accounts are in their following,
+    // so fetching first ~100-200 should cover most cases
+    const variables = {
+      userId: userId,
+      count: 200,
+      includePromotedContent: false
+    };
+
+    const features = {
+      rweb_tipjar_consumption_enabled: true,
+      responsive_web_graphql_exclude_directive_enabled: true,
+      verified_phone_label_enabled: false,
+      creator_subscriptions_tweet_preview_api_enabled: true,
+      responsive_web_graphql_timeline_navigation_enabled: true,
+      responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+      communities_web_enable_tweet_community_results_fetch: true,
+      c9s_tweet_anatomy_moderator_badge_enabled: true,
+      articles_preview_enabled: true,
+      responsive_web_edit_tweet_api_enabled: true,
+      graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+      view_counts_everywhere_api_enabled: true,
+      longform_notetweets_consumption_enabled: true,
+      responsive_web_twitter_article_tweet_consumption_enabled: true,
+      tweet_awards_web_tipping_enabled: false,
+      creator_subscriptions_quote_tweet_preview_enabled: false,
+      freedom_of_speech_not_reach_fetch_enabled: true,
+      standardized_nudges_misinfo: true,
+      tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+      rweb_video_timestamps_enabled: true,
+      longform_notetweets_rich_text_read_enabled: true,
+      longform_notetweets_inline_media_enabled: true,
+      responsive_web_enhance_cards_enabled: false
+    };
+
+    const url = `https://x.com/i/api/graphql/PAnE9toEjRfE-4tozRcsfw/Following?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
+
+    const response = await fetchWithTimeout(url, {
+      credentials: 'include',
+      headers: {
+        'accept': '*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/json',
+        'x-twitter-active-user': 'yes',
+        'x-twitter-auth-type': 'OAuth2Session',
+        'x-twitter-client-language': 'en'
+      }
+    }, 15000);
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch following: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Extract usernames from the response
+    const instructions = data?.data?.user?.result?.timeline?.timeline?.instructions || [];
+    for (const instruction of instructions) {
+      if (instruction.entries) {
+        for (const entry of instruction.entries) {
+          const userResult = entry?.content?.itemContent?.user_results?.result;
+          if (userResult?.legacy?.screen_name) {
+            following.push(userResult.legacy.screen_name);
+          } else if (userResult?.core?.screen_name) {
+            following.push(userResult.core.screen_name);
+          }
+        }
+      }
+    }
+
+    return following;
+  }
+
+  // Fetch user info by screen name
+  async function fetchUserByScreenName(screenName) {
+    const variables = {
+      screen_name: screenName,
+      withSafetyModeUserFields: true
+    };
+
+    const features = {
+      hidden_profile_subscriptions_enabled: true,
+      rweb_tipjar_consumption_enabled: true,
+      responsive_web_graphql_exclude_directive_enabled: true,
+      verified_phone_label_enabled: false,
+      subscriptions_verification_info_is_identity_verified_enabled: true,
+      subscriptions_verification_info_verified_since_enabled: true,
+      highlights_tweets_tab_ui_enabled: true,
+      responsive_web_twitter_article_notes_tab_enabled: true,
+      subscriptions_feature_can_gift_premium: true,
+      creator_subscriptions_tweet_preview_api_enabled: true,
+      responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+      responsive_web_graphql_timeline_navigation_enabled: true
+    };
+
+    const fieldToggles = {
+      withAuxiliaryUserLabels: false
+    };
+
+    const url = `https://x.com/i/api/graphql/xc8f1g7BYqr6VTzTbvNlGw/UserByScreenName?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}&fieldToggles=${encodeURIComponent(JSON.stringify(fieldToggles))}`;
+
+    const response = await fetchWithTimeout(url, {
+      credentials: 'include',
+      headers: {
+        'accept': '*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/json',
+        'x-twitter-active-user': 'yes',
+        'x-twitter-auth-type': 'OAuth2Session',
+        'x-twitter-client-language': 'en'
+      }
+    }, 15000);
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch user: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data?.data?.user?.result;
+  }
 
 })();

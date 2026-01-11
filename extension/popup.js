@@ -30,7 +30,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Stats elements
   const statRetweeters = document.getElementById('stat-retweeters');
   const statLikers = document.getElementById('stat-likers');
-  const statFollowers = document.getElementById('stat-followers');
   const statEligible = document.getElementById('stat-eligible');
   const statFiltered = document.getElementById('stat-filtered');
 
@@ -50,24 +49,39 @@ document.addEventListener('DOMContentLoaded', async () => {
     currentCollection: null
   };
 
-  // Collection queue for sequential processing
-  let collectionQueue = [];
-  let isProcessingQueue = false;
-
   // Load saved state
   await loadState();
+
+  // Try to detect tweet from current tab - this will clear data if tweet changed
+  await detectCurrentTweet();
+
   updateUI();
 
-  // Try to detect tweet from current tab
-  detectCurrentTweet();
+  // Display winners if they exist from previous session
+  if (state.winners && state.winners.length > 0) {
+    displayWinners();
+  }
 
-  // Poll for updates while collecting
-  setInterval(async () => {
-    if (state.isCollecting) {
-      await fetchCollectedData();
-      updateUI();
-    }
-  }, 2000);
+  // Poll for updates while collecting (optimized to only poll when needed)
+  let pollInterval = null;
+  function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(async () => {
+      if (state.isCollecting) {
+        await fetchCollectedData();
+        updateUI();
+      } else {
+        // Stop polling when not collecting
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    }, 2000);
+  }
+
+  // Start polling if already collecting
+  if (state.isCollecting) {
+    startPolling();
+  }
 
   // Event listeners
   detectBtn.addEventListener('click', detectCurrentTweet);
@@ -87,20 +101,62 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   collectAllBtn.addEventListener('click', startCollection);
   stopBtn.addEventListener('click', stopCollection);
-  pickBtn.addEventListener('click', pickWinners);
+
+  // Debounced UI update for filter changes
+  let filterUpdateTimeout = null;
+  function debouncedUpdateUI() {
+    if (filterUpdateTimeout) clearTimeout(filterUpdateTimeout);
+    filterUpdateTimeout = setTimeout(() => {
+      updateUI();
+      saveSettings();
+    }, 150);
+  }
+
+  // Update stats when filters change
+  document.getElementById('filter-followers').addEventListener('input', debouncedUpdateUI);
+  document.getElementById('filter-tweets').addEventListener('input', debouncedUpdateUI);
+  document.getElementById('filter-age').addEventListener('input', debouncedUpdateUI);
+  document.getElementById('filter-avatar').addEventListener('change', debouncedUpdateUI);
+
+  // Save settings when requirements change
+  reqRetweet.addEventListener('change', saveSettings);
+  reqLike.addEventListener('change', saveSettings);
+  reqFollow.addEventListener('change', saveSettings);
+  winnerCountInput.addEventListener('change', saveSettings);
+  pickBtn.addEventListener('click', async () => {
+    try {
+      await pickWinners();
+    } catch (e) {
+      console.error('[Popup] Pick winners error:', e);
+      showError('Error picking winners: ' + e.message);
+    }
+  });
   copyWinnersBtn.addEventListener('click', copyWinners);
   repickBtn.addEventListener('click', pickWinners);
   newGiveawayBtn.addEventListener('click', resetGiveaway);
 
-  // Listen for collection updates from content script
+  // Listen for collection updates from content script and background
   chrome.runtime.onMessage.addListener((message) => {
     if (message.type === 'COLLECTION_PROGRESS') {
       updateCollectionStatus(message.collectType, 'collecting', message.count, message.account);
       showProgress(`Collecting ${message.collectType}: ${message.count} found...`);
     } else if (message.type === 'COLLECTION_COMPLETE') {
       updateCollectionStatus(message.collectType, 'complete', message.count, message.account);
+      fetchCollectedData().then(() => updateUI());
+    } else if (message.type === 'STORAGE_ERROR') {
+      // Show storage error to user
+      showWarning('Warning: Failed to save data. Your progress may be lost if you close the browser.');
+    } else if (message.type === 'QUEUE_COMPLETE') {
+      // All collections done
+      state.isCollecting = false;
+      collectAllBtn.classList.remove('hidden');
+      stopBtn.classList.add('hidden');
+      hideProgress();
       fetchCollectedData().then(() => {
-        processNextInQueue();
+        updateUI();
+        if (state.retweeters.length > 0 || state.likers.length > 0) {
+          showSuccess('Collection complete!');
+        }
       });
     }
   });
@@ -108,7 +164,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Functions
   async function loadState() {
     try {
-      const saved = await chrome.storage.local.get(['giveawayState', 'collectedData']);
+      const saved = await chrome.storage.local.get(['giveawayState', 'collectedData', 'giveawaySettings']);
 
       if (saved.giveawayState) {
         state = { ...state, ...saved.giveawayState };
@@ -119,6 +175,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         state.likers = saved.collectedData.likers || [];
         state.followers = saved.collectedData.followers || {};
         state.tweetId = saved.collectedData.currentTweetId || state.tweetId;
+      }
+
+      // Restore filter settings
+      if (saved.giveawaySettings) {
+        const settings = saved.giveawaySettings;
+        if (settings.minFollowers !== undefined) {
+          document.getElementById('filter-followers').value = settings.minFollowers;
+        }
+        if (settings.minTweets !== undefined) {
+          document.getElementById('filter-tweets').value = settings.minTweets;
+        }
+        if (settings.minAge !== undefined) {
+          document.getElementById('filter-age').value = settings.minAge;
+        }
+        if (settings.requireAvatar !== undefined) {
+          document.getElementById('filter-avatar').checked = settings.requireAvatar;
+        }
+        if (settings.requireRetweet !== undefined) {
+          reqRetweet.checked = settings.requireRetweet;
+        }
+        if (settings.requireLike !== undefined) {
+          reqLike.checked = settings.requireLike;
+        }
+        if (settings.requireFollow !== undefined) {
+          reqFollow.checked = settings.requireFollow;
+        }
+        if (settings.winnerCount !== undefined) {
+          winnerCountInput.value = settings.winnerCount;
+        }
       }
     } catch (e) {
       console.error('Error loading state:', e);
@@ -139,6 +224,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  // Save filter settings (debounced)
+  let saveSettingsTimeout = null;
+  function saveSettings() {
+    if (saveSettingsTimeout) clearTimeout(saveSettingsTimeout);
+    saveSettingsTimeout = setTimeout(async () => {
+      try {
+        await chrome.storage.local.set({
+          giveawaySettings: {
+            minFollowers: parseInt(document.getElementById('filter-followers').value) || 0,
+            minTweets: parseInt(document.getElementById('filter-tweets').value) || 0,
+            minAge: parseInt(document.getElementById('filter-age').value) || 0,
+            requireAvatar: document.getElementById('filter-avatar').checked,
+            requireRetweet: reqRetweet.checked,
+            requireLike: reqLike.checked,
+            requireFollow: reqFollow.checked,
+            winnerCount: parseInt(winnerCountInput.value) || 1
+          }
+        });
+      } catch (e) {
+        console.error('Error saving settings:', e);
+      }
+    }, 500);
+  }
+
   async function detectCurrentTweet() {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -153,31 +262,71 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
+      let newTweetId = null;
+
       // Try to get tweet ID from content script
       try {
         const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_TWEET_ID' });
         if (response?.tweetId) {
-          state.tweetId = response.tweetId;
-          tweetUrlInput.value = tab.url;
-          hideError();
-          return;
+          newTweetId = response.tweetId;
         }
       } catch (e) {
         // Content script not loaded, try URL parsing
       }
 
-      // Extract from URL
-      const match = tab.url.match(/\/status\/(\d+)/);
-      if (match) {
-        state.tweetId = match[1];
-        tweetUrlInput.value = tab.url;
-        hideError();
-      } else {
-        showError('Navigate to a tweet to detect it');
+      // Extract from URL if not found
+      if (!newTweetId) {
+        const match = tab.url.match(/\/status\/(\d+)/);
+        if (match) {
+          newTweetId = match[1];
+        }
       }
+
+      if (!newTweetId) {
+        showError('Navigate to a tweet to detect it');
+        return;
+      }
+
+      // Check if this is a different tweet than before
+      if (state.tweetId && state.tweetId !== newTweetId) {
+        // Different tweet - clear old data
+        await clearCollectedData();
+      }
+
+      state.tweetId = newTweetId;
+      tweetUrlInput.value = tab.url;
+      hideError();
+      updateUI();
+
     } catch (e) {
       showError('Could not detect tweet. Refresh the page and try again.');
     }
+  }
+
+  async function clearCollectedData() {
+    state.retweeters = [];
+    state.likers = [];
+    state.followers = {};
+    state.eligible = [];
+    state.winners = [];
+
+    try {
+      await chrome.storage.local.remove(['collectedData', 'pendingCollection']);
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      await chrome.tabs.sendMessage(tab.id, { type: 'CLEAR_DATA' });
+    } catch (e) {}
+
+    // Reset status indicators
+    if (statusRetweet) {
+      statusRetweet.className = 'requirement-status status-idle';
+      statusRetweet.textContent = 'Not collected';
+    }
+    if (statusLike) {
+      statusLike.className = 'requirement-status status-idle';
+      statusLike.textContent = 'Not collected';
+    }
+
+    winnersSection.classList.add('hidden');
   }
 
   function addFollowInput() {
@@ -221,23 +370,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     hideError();
     state.isCollecting = true;
-    collectionQueue = [];
+    startPolling(); // Start polling for updates
+    const queue = [];
 
-    // Build collection queue
+    // Build collection queue (only retweeters and likers - followers verified at pick time)
     if (reqRetweet.checked) {
-      collectionQueue.push({ type: 'retweeters', tweetId: state.tweetId });
+      queue.push({ type: 'retweeters', tweetId: state.tweetId });
     }
     if (reqLike.checked) {
-      collectionQueue.push({ type: 'likers', tweetId: state.tweetId });
+      queue.push({ type: 'likers', tweetId: state.tweetId });
     }
-    if (reqFollow.checked) {
-      const accounts = getFollowAccounts();
-      for (const account of accounts) {
-        collectionQueue.push({ type: 'followers', tweetId: state.tweetId, account });
-      }
-    }
+    // Note: followers are verified when picking winners, not collected
 
-    if (collectionQueue.length === 0) {
+    if (queue.length === 0) {
       showError('Select at least one requirement');
       state.isCollecting = false;
       return;
@@ -248,59 +393,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     stopBtn.classList.remove('hidden');
     showProgress('Starting collection...');
 
-    // Process queue
-    isProcessingQueue = true;
-    processNextInQueue();
-  }
-
-  async function processNextInQueue() {
-    if (collectionQueue.length === 0 || !state.isCollecting) {
-      // All done
+    // Send queue to background script to manage
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'START_QUEUE',
+        queue: queue
+      });
+    } catch (e) {
+      showError('Failed to start collection: ' + e.message);
       state.isCollecting = false;
-      isProcessingQueue = false;
       collectAllBtn.classList.remove('hidden');
       stopBtn.classList.add('hidden');
-      hideProgress();
-
-      await fetchCollectedData();
-      updateUI();
-
-      if (state.retweeters.length > 0 || state.likers.length > 0) {
-        showSuccess('Collection complete!');
-      }
-      return;
-    }
-
-    const next = collectionQueue.shift();
-    state.currentCollection = next;
-
-    showProgress(`Collecting ${next.type}${next.account ? ` (@${next.account})` : ''}...`);
-    updateCollectionStatus(next.type, 'collecting', 0, next.account);
-
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-      await chrome.tabs.sendMessage(tab.id, {
-        type: 'START_COLLECT',
-        collectType: next.type,
-        tweetId: next.tweetId,
-        accountUsername: next.account
-      });
-
-      // The content script will navigate and continue
-      // We'll get COLLECTION_COMPLETE when done
-    } catch (e) {
-      showError(`Failed to start ${next.type} collection. Refresh the page and try again.`);
-      processNextInQueue();
     }
   }
 
   async function stopCollection() {
     state.isCollecting = false;
-    collectionQueue = [];
-    isProcessingQueue = false;
 
     try {
+      // Clear background queue
+      await chrome.runtime.sendMessage({ type: 'CLEAR_QUEUE' });
+
+      // Stop content script collection
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       await chrome.tabs.sendMessage(tab.id, { type: 'STOP_COLLECT' });
     } catch (e) {}
@@ -335,13 +449,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       statusEl = statusRetweet;
     } else if (type === 'likers') {
       statusEl = statusLike;
-    } else if (type === 'followers' && account) {
-      // Update followers count in stats
-      if (statFollowers) {
-        const totalFollowers = Object.values(state.followers).reduce((sum, arr) => sum + arr.length, 0);
-        statFollowers.textContent = totalFollowers.toLocaleString();
-      }
-      return;
     }
 
     if (!statusEl) return;
@@ -364,35 +471,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   function calculateEligible() {
     let eligibleSet = null;
 
+    const retweeterSet = new Set(state.retweeters.map(u => u.username.toLowerCase()));
+    const likerSet = new Set(state.likers.map(u => u.username.toLowerCase()));
+
     // Start with retweeters if required
     if (reqRetweet.checked && state.retweeters.length > 0) {
-      const set = new Set(state.retweeters.map(u => u.username.toLowerCase()));
-      eligibleSet = set;
+      eligibleSet = new Set(retweeterSet);
     }
 
     // Intersect with likers if required
     if (reqLike.checked && state.likers.length > 0) {
-      const set = new Set(state.likers.map(u => u.username.toLowerCase()));
       if (eligibleSet) {
-        eligibleSet = new Set([...eligibleSet].filter(u => set.has(u)));
+        eligibleSet = new Set([...eligibleSet].filter(u => likerSet.has(u)));
       } else {
-        eligibleSet = set;
-      }
-    }
-
-    // Intersect with followers if required
-    if (reqFollow.checked) {
-      const accounts = getFollowAccounts();
-      for (const account of accounts) {
-        const followers = state.followers[account.toLowerCase()] || [];
-        if (followers.length > 0) {
-          const set = new Set(followers.map(u => u.username.toLowerCase()));
-          if (eligibleSet) {
-            eligibleSet = new Set([...eligibleSet].filter(u => set.has(u)));
-          } else {
-            eligibleSet = set;
-          }
-        }
+        eligibleSet = new Set(likerSet);
       }
     }
 
@@ -402,11 +494,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const userMap = new Map();
     [...state.likers, ...state.retweeters].forEach(u => {
       userMap.set(u.username.toLowerCase(), u);
-    });
-    Object.values(state.followers).flat().forEach(u => {
-      if (!userMap.has(u.username.toLowerCase())) {
-        userMap.set(u.username.toLowerCase(), u);
-      }
     });
 
     return Array.from(eligibleSet)
@@ -424,16 +511,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     minDate.setDate(minDate.getDate() - minAge);
 
     return users.filter(u => {
-      // Filter out users with insufficient data if filters are set
-      if (minFollowers > 0) {
-        if (u.followerCount === undefined || u.followerCount < minFollowers) {
-          return false;
-        }
+      // Only apply filters when we have the data (don't exclude if data is missing)
+      if (minFollowers > 0 && u.followerCount !== undefined) {
+        if (u.followerCount < minFollowers) return false;
       }
-      if (minTweets > 0) {
-        if (u.tweetCount === undefined || u.tweetCount < minTweets) {
-          return false;
-        }
+      if (minTweets > 0 && u.tweetCount !== undefined) {
+        if (u.tweetCount < minTweets) return false;
       }
       if (minAge > 0 && u.createdAt) {
         try {
@@ -441,16 +524,16 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (created > minDate) return false;
         } catch (e) {}
       }
-      if (requireAvatar) {
-        if (!u.avatarUrl || u.avatarUrl.includes('default_profile')) {
-          return false;
-        }
+      if (requireAvatar && u.avatarUrl) {
+        if (u.avatarUrl.includes('default_profile')) return false;
       }
       return true;
     });
   }
 
-  function pickWinners() {
+  async function pickWinners() {
+    showProgress('Picking winners...');
+
     const eligible = calculateEligible();
     const filtered = applyFilters(eligible);
     let count = parseInt(winnerCountInput.value) || 1;
@@ -459,6 +542,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     count = Math.max(1, Math.min(count, 100, filtered.length));
 
     if (filtered.length === 0) {
+      hideProgress();
       if (eligible.length === 0) {
         showError('No eligible participants. Make sure to collect data first and check that users meet all requirements.');
       } else {
@@ -476,11 +560,102 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Crypto shuffle using rejection sampling for unbiased results
     const shuffled = unbiasedShuffle(filtered);
-    state.winners = shuffled.slice(0, count);
-    state.eligible = eligible;
 
+    // Check if we need to verify followers
+    const requiredFollows = reqFollow.checked ? getFollowAccounts() : [];
+
+    if (requiredFollows.length > 0) {
+      showProgress('Verifying winners follow required accounts...');
+      pickBtn.disabled = true;
+
+      try {
+        const verifiedWinners = await verifyAndPickWinners(shuffled, count, requiredFollows);
+        state.winners = verifiedWinners;
+      } catch (e) {
+        showError('Failed to verify followers: ' + e.message);
+        pickBtn.disabled = false;
+        hideProgress();
+        return;
+      }
+
+      pickBtn.disabled = false;
+      hideProgress();
+    } else {
+      state.winners = shuffled.slice(0, count);
+    }
+
+    state.eligible = eligible;
     displayWinners();
     saveState();
+  }
+
+  // Verify candidates follow required accounts and return verified winners
+  async function verifyAndPickWinners(candidates, count, requiredAccounts) {
+    const winners = [];
+    const failed = [];
+    const errors = [];
+    const maxToCheck = Math.min(candidates.length, count + 10); // Check up to 10 extra as backups
+
+    for (let i = 0; i < maxToCheck && winners.length < count; i++) {
+      const candidate = candidates[i];
+      showProgress(`Verifying @${candidate.username} (${winners.length}/${count} winners, ${i + 1}/${maxToCheck} checked)...`);
+
+      try {
+        const result = await checkUserFollows(candidate.username, requiredAccounts);
+        if (result.followsAll) {
+          winners.push(candidate);
+        } else if (result.results) {
+          // Track which accounts they don't follow
+          const notFollowing = Object.entries(result.results)
+            .filter(([_, follows]) => !follows)
+            .map(([account]) => account);
+          failed.push({ username: candidate.username, notFollowing });
+        } else if (result.error) {
+          errors.push({ username: candidate.username, error: result.error });
+        }
+      } catch (e) {
+        errors.push({ username: candidate.username, error: e.message });
+      }
+
+      // Small delay to avoid rate limiting
+      if (i < maxToCheck - 1) {
+        await sleep(500);
+      }
+    }
+
+    // Report issues to user
+    if (winners.length < count) {
+      let message = `Only found ${winners.length} of ${count} winners who follow all required accounts.`;
+      if (failed.length > 0) {
+        message += ` ${failed.length} candidates didn't follow required accounts.`;
+      }
+      if (errors.length > 0) {
+        message += ` ${errors.length} verification(s) failed (API errors).`;
+      }
+      showWarning(message);
+    }
+
+    return winners;
+  }
+
+  // Check if a user follows all required accounts
+  // Returns { followsAll: boolean, results?: { account: boolean }, error?: string }
+  async function checkUserFollows(username, requiredAccounts) {
+    // Get the user's following list by sending message to content script
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: 'CHECK_FOLLOWS',
+      username: username,
+      requiredAccounts: requiredAccounts
+    });
+
+    // Return full response object for detailed error reporting
+    return response || { followsAll: false, error: 'No response from content script' };
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   // Unbiased Fisher-Yates shuffle
@@ -498,6 +673,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Generate unbiased random integer using rejection sampling
   function secureRandomInt(max) {
+    // Handle edge cases that would cause infinite loop or division by zero
+    if (max <= 0) return 0;
+    if (max === 1) return 0;
+
     const randomBuffer = new Uint32Array(1);
     const maxValid = Math.floor(0xFFFFFFFF / max) * max;
 
@@ -580,11 +759,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       currentCollection: null
     };
 
-    collectionQueue = [];
-    isProcessingQueue = false;
-
     try {
-      await chrome.storage.local.remove(['giveawayState', 'collectedData', 'pendingCollection']);
+      await chrome.storage.local.remove(['giveawayState', 'collectedData', 'pendingCollection', 'giveawaySettings']);
 
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       await chrome.tabs.sendMessage(tab.id, { type: 'CLEAR_DATA' });
@@ -614,11 +790,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Update stats
     statRetweeters.textContent = state.retweeters.length.toLocaleString();
     statLikers.textContent = state.likers.length.toLocaleString();
-
-    if (statFollowers) {
-      const totalFollowers = Object.values(state.followers).reduce((sum, arr) => sum + arr.length, 0);
-      statFollowers.textContent = totalFollowers.toLocaleString();
-    }
 
     const eligible = calculateEligible();
     const filtered = applyFilters(eligible);

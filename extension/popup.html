@@ -452,21 +452,40 @@
 
       <div class="requirement-row" style="flex-direction: column; align-items: stretch;">
         <label class="requirement-label" style="margin-bottom: 8px;">
-          <input type="checkbox" id="req-follow" checked>
-          Must Follow Accounts
+          <input type="checkbox" id="req-follow">
+          Must Follow (verified when picking)
         </label>
         <div class="follow-accounts" id="follow-accounts">
           <div class="follow-input-row">
             <input type="text" placeholder="@username" class="follow-input">
             <button class="btn btn-secondary remove-follow">×</button>
           </div>
-          <div class="follow-input-row">
-            <input type="text" placeholder="@username" class="follow-input">
-            <button class="btn btn-secondary remove-follow">×</button>
+        </div>
+        <span class="add-account-btn" id="add-follow-btn">+ Add another</span>
+        <div style="font-size: 11px; color: #536471; margin-top: 4px;">Winners will be verified to follow these accounts</div>
+      </div>
+
+      <details style="margin: 12px 0;">
+        <summary style="font-size: 13px; color: #536471; cursor: pointer;">Bot Filters (optional)</summary>
+        <div style="padding-top: 8px;">
+          <div class="filter-row">
+            <label for="filter-followers">Min Followers</label>
+            <input type="number" id="filter-followers" value="0" min="0" aria-label="Minimum follower count">
+          </div>
+          <div class="filter-row">
+            <label for="filter-tweets">Min Tweets</label>
+            <input type="number" id="filter-tweets" value="0" min="0" aria-label="Minimum tweet count">
+          </div>
+          <div class="filter-row">
+            <label for="filter-age">Min Account Age (days)</label>
+            <input type="number" id="filter-age" value="0" min="0" aria-label="Minimum account age in days">
+          </div>
+          <div class="filter-row">
+            <label for="filter-avatar">Require Profile Picture</label>
+            <input type="checkbox" id="filter-avatar" aria-label="Require profile picture">
           </div>
         </div>
-        <span class="add-account-btn" id="add-follow-btn">+ Add another account</span>
-      </div>
+      </details>
 
       <div class="collect-btn-row">
         <button class="btn btn-primary" id="collect-all-btn" aria-label="Start collecting data from Twitter">Collect All Data</button>
@@ -484,7 +503,7 @@
         <span>3</span> Pick Winners
       </div>
 
-      <div class="stats-grid-3" role="group" aria-label="Collection statistics">
+      <div class="stats-grid" role="group" aria-label="Collection statistics">
         <div class="stat-box">
           <div class="stat-value" id="stat-retweeters" aria-label="Retweeters count">0</div>
           <div class="stat-label">Retweeters</div>
@@ -492,10 +511,6 @@
         <div class="stat-box">
           <div class="stat-value" id="stat-likers" aria-label="Likers count">0</div>
           <div class="stat-label">Likers</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-value" id="stat-followers" aria-label="Followers count">0</div>
-          <div class="stat-label">Followers</div>
         </div>
       </div>
       <div class="stats-grid" role="group" aria-label="Eligibility statistics">
@@ -513,28 +528,6 @@
         <label for="winner-count">Number of Winners</label>
         <input type="number" id="winner-count" value="1" min="1" max="100" aria-label="Number of winners to pick">
       </div>
-
-      <details style="margin-bottom: 12px;">
-        <summary style="font-size: 13px; color: #536471; cursor: pointer;">Bot Filters</summary>
-        <div style="padding-top: 8px;">
-          <div class="filter-row">
-            <label for="filter-followers">Min Followers</label>
-            <input type="number" id="filter-followers" value="10" min="0" aria-label="Minimum follower count">
-          </div>
-          <div class="filter-row">
-            <label for="filter-tweets">Min Tweets</label>
-            <input type="number" id="filter-tweets" value="5" min="0" aria-label="Minimum tweet count">
-          </div>
-          <div class="filter-row">
-            <label for="filter-age">Min Account Age (days)</label>
-            <input type="number" id="filter-age" value="30" min="0" aria-label="Minimum account age in days">
-          </div>
-          <div class="filter-row">
-            <label for="filter-avatar">Require Profile Picture</label>
-            <input type="checkbox" id="filter-avatar" checked aria-label="Require profile picture">
-          </div>
-        </div>
-      </details>
 
       <button class="btn btn-success btn-full" id="pick-btn">Pick Winners</button>
     </div>

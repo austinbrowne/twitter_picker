@@ -27,20 +27,73 @@ let giveawayData = {
   }
 };
 
+// Collection queue managed by background script
+let collectionQueue = [];
+
 // Restore state from storage on service worker start
-chrome.storage.local.get(['giveawayData'], (result) => {
+chrome.storage.local.get(['giveawayData', 'collectionQueue'], (result) => {
   if (result.giveawayData) {
     giveawayData = result.giveawayData;
+  }
+  if (result.collectionQueue) {
+    collectionQueue = result.collectionQueue;
   }
 });
 
 // Save state to storage (debounced)
 let saveTimeout = null;
+let lastSaveError = null;
 function saveToStorage() {
   if (saveTimeout) clearTimeout(saveTimeout);
-  saveTimeout = setTimeout(() => {
-    chrome.storage.local.set({ giveawayData }).catch(() => {});
+  saveTimeout = setTimeout(async () => {
+    try {
+      await chrome.storage.local.set({ giveawayData });
+      lastSaveError = null;
+    } catch (e) {
+      if (lastSaveError !== e.message) {
+        lastSaveError = e.message;
+        console.error('[Background] Storage save failed:', e.message);
+      }
+    }
   }, 500);
+}
+
+// Save collection queue to storage
+function saveQueue() {
+  chrome.storage.local.set({ collectionQueue }).catch(() => {});
+}
+
+// Process next item in collection queue
+async function processNextInQueue() {
+  if (collectionQueue.length === 0) {
+    // Broadcast completion to popup
+    chrome.runtime.sendMessage({ type: 'QUEUE_COMPLETE' }).catch(() => {});
+    return;
+  }
+
+  const next = collectionQueue.shift();
+  saveQueue();
+
+  try {
+    // Find the Twitter tab
+    const tabs = await chrome.tabs.query({ url: ['*://twitter.com/*', '*://x.com/*'] });
+    if (tabs.length === 0) {
+      return;
+    }
+
+    const tab = tabs[0];
+
+    // Send message to content script to start collection
+    await chrome.tabs.sendMessage(tab.id, {
+      type: 'START_COLLECT',
+      collectType: next.type,
+      tweetId: next.tweetId,
+      accountUsername: next.account
+    });
+  } catch (e) {
+    // Try again with next item
+    processNextInQueue();
+  }
 }
 
 // Input validation helpers
@@ -184,6 +237,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         saveToStorage();
         // Broadcast to popup
         chrome.runtime.sendMessage(message).catch(() => {});
+        // Process next item in queue after a short delay
+        setTimeout(() => processNextInQueue(), 1000);
+        break;
+
+      case 'START_QUEUE':
+        // Set up collection queue from popup
+        if (Array.isArray(message.queue)) {
+          collectionQueue = message.queue.filter(item =>
+            item && item.type && item.tweetId &&
+            ['retweeters', 'likers', 'followers'].includes(item.type)
+          );
+          saveQueue();
+          // Start processing
+          processNextInQueue();
+          sendResponse({ success: true, queueLength: collectionQueue.length });
+        } else {
+          sendResponse({ success: false, error: 'Invalid queue' });
+        }
+        break;
+
+      case 'GET_QUEUE':
+        sendResponse({ queue: collectionQueue });
+        break;
+
+      case 'CLEAR_QUEUE':
+        collectionQueue = [];
+        saveQueue();
+        sendResponse({ success: true });
         break;
 
       case 'CALCULATE_ELIGIBLE':
