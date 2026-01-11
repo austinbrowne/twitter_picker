@@ -173,13 +173,45 @@ export interface ParsedInput {
 }
 
 /**
+ * Giveaway requirements configuration
+ */
+export interface GiveawayConfig {
+  /** Tweet URL for the giveaway */
+  tweetUrl: string;
+  /** Require retweet */
+  requireRetweet: boolean;
+  /** Require like */
+  requireLike: boolean;
+  /** Accounts users must follow (usernames) */
+  mustFollow: string[];
+  /** Twitter API Bearer Token */
+  bearerToken: string;
+}
+
+/**
+ * Default giveaway configuration
+ */
+export const DEFAULT_GIVEAWAY_CONFIG: Omit<GiveawayConfig, 'bearerToken'> = {
+  tweetUrl: '',
+  requireRetweet: true,
+  requireLike: true,
+  mustFollow: [],
+};
+
+/**
  * Application state
  */
 export interface AppState {
   /** Current step in the flow */
-  step: 'input' | 'filter' | 'draw' | 'results';
+  step: 'setup' | 'requirements' | 'fetching' | 'filter' | 'draw' | 'results';
+  /** Input mode */
+  inputMode: 'api' | 'manual';
+  /** Giveaway configuration */
+  giveawayConfig: GiveawayConfig;
   /** Parsed participants */
   participants: Participant[];
+  /** Disqualified participants (didn't meet requirements) */
+  disqualified: { participant: Participant; reasons: string[] }[];
   /** Current filter configuration */
   filterConfig: FilterConfig;
   /** Number of winners to select */
@@ -190,10 +222,20 @@ export interface AppState {
   draw: Draw | null;
   /** Loading state */
   isLoading: boolean;
+  /** Progress message */
+  progressMessage: string;
   /** Error message */
   error: string | null;
   /** Tweet URL (if provided) */
   tweetUrl: string;
+  /** Verification stats from API */
+  verificationStats: {
+    totalRetweeters: number;
+    totalLikers: number;
+    bothRetweetAndLike: number;
+    followsAllAccounts: number;
+    eligible: number;
+  } | null;
 }
 
 /**

@@ -4,6 +4,9 @@
 
 export { Header } from './Header';
 export { StepIndicator } from './StepIndicator';
+export { ApiSetup } from './ApiSetup';
+export { GiveawayRequirements } from './GiveawayRequirements';
+export { FetchingProgress } from './FetchingProgress';
 export { ParticipantInput } from './ParticipantInput';
 export { FilterConfig } from './FilterConfig';
 export { DrawButton } from './DrawButton';
