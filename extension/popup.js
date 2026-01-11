@@ -469,18 +469,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function calculateEligible() {
+    // If a requirement is set but list is empty, no one can be eligible
+    if (reqRetweet.checked && state.retweeters.length === 0) {
+      return [];
+    }
+    if (reqLike.checked && state.likers.length === 0) {
+      return [];
+    }
+
     let eligibleSet = null;
 
     const retweeterSet = new Set(state.retweeters.map(u => u.username.toLowerCase()));
     const likerSet = new Set(state.likers.map(u => u.username.toLowerCase()));
 
     // Start with retweeters if required
-    if (reqRetweet.checked && state.retweeters.length > 0) {
+    if (reqRetweet.checked) {
       eligibleSet = new Set(retweeterSet);
     }
 
     // Intersect with likers if required
-    if (reqLike.checked && state.likers.length > 0) {
+    if (reqLike.checked) {
       if (eligibleSet) {
         eligibleSet = new Set([...eligibleSet].filter(u => likerSet.has(u)));
       } else {

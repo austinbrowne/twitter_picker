@@ -320,6 +320,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function calculateEligible() {
   const req = giveawayData.requirements;
 
+  // If a requirement is set but list is empty, no one can be eligible
+  if (req.mustRetweet && giveawayData.retweeters.length === 0) {
+    return [];
+  }
+  if (req.mustLike && giveawayData.likers.length === 0) {
+    return [];
+  }
+
   // Start with all users from first required source
   let eligibleSet = null;
 
