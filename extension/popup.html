@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 380px;
+      min-height: 400px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f7f9fa;
+      color: #0f1419;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #1d9bf0 0%, #1a8cd8 100%);
+      color: white;
+      padding: 16px;
+      text-align: center;
+    }
+
+    .header h1 {
+      font-size: 18px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .header .subtitle {
+      font-size: 12px;
+      opacity: 0.9;
+      margin-top: 4px;
+    }
+
+    .content {
+      padding: 16px;
+    }
+
+    .section {
+      background: white;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #536471;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .tweet-input {
+      display: flex;
+      gap: 8px;
+    }
+
+    .tweet-input input {
+      flex: 1;
+      padding: 10px 12px;
+      border: 1px solid #cfd9de;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+
+    .tweet-input input:focus {
+      outline: none;
+      border-color: #1d9bf0;
+    }
+
+    .btn {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #1d9bf0;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #1a8cd8;
+    }
+
+    .btn-primary:disabled {
+      background: #9ecbf0;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: #eff3f4;
+      color: #0f1419;
+    }
+
+    .btn-secondary:hover {
+      background: #e1e8ea;
+    }
+
+    .btn-success {
+      background: #00ba7c;
+      color: white;
+    }
+
+    .btn-full {
+      width: 100%;
+    }
+
+    .requirement-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #eff3f4;
+    }
+
+    .requirement-row:last-child {
+      border-bottom: none;
+    }
+
+    .requirement-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .requirement-status {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 12px;
+    }
+
+    .status-idle {
+      background: #eff3f4;
+      color: #536471;
+    }
+
+    .status-collecting {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .status-complete {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .follow-accounts {
+      margin-top: 12px;
+    }
+
+    .follow-input-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .follow-input-row input {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid #cfd9de;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+
+    .follow-input-row .btn {
+      padding: 8px 12px;
+    }
+
+    .add-account-btn {
+      font-size: 13px;
+      color: #1d9bf0;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .collect-btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .collect-btn-row .btn {
+      flex: 1;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+    }
+
+    .stat-box {
+      background: #f7f9fa;
+      padding: 12px;
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 24px;
+      font-weight: 700;
+      color: #1d9bf0;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      color: #536471;
+      margin-top: 2px;
+    }
+
+    .filter-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+    }
+
+    .filter-row label {
+      font-size: 13px;
+    }
+
+    .filter-row input[type="number"] {
+      width: 70px;
+      padding: 6px 8px;
+      border: 1px solid #cfd9de;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+
+    .filter-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+    }
+
+    .winner-count-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 0;
+    }
+
+    .winner-count-row label {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .winner-count-row input {
+      width: 60px;
+      padding: 8px;
+      border: 1px solid #cfd9de;
+      border-radius: 6px;
+      font-size: 16px;
+      text-align: center;
+    }
+
+    .winners-list {
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .winner-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px;
+      background: #f0fdf4;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+
+    .winner-rank {
+      width: 28px;
+      height: 28px;
+      background: #00ba7c;
+      color: white;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .winner-info {
+      flex: 1;
+    }
+
+    .winner-username {
+      font-weight: 600;
+      color: #0f1419;
+    }
+
+    .winner-meta {
+      font-size: 12px;
+      color: #536471;
+    }
+
+    .winner-link {
+      color: #1d9bf0;
+      text-decoration: none;
+    }
+
+    .error-msg {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #dc2626;
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #eff3f4;
+      margin-bottom: 12px;
+    }
+
+    .tab {
+      flex: 1;
+      padding: 10px;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 600;
+      color: #536471;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+    }
+
+    .tab.active {
+      color: #1d9bf0;
+      border-bottom-color: #1d9bf0;
+    }
+
+    .copy-btn {
+      font-size: 12px;
+      padding: 6px 12px;
+    }
+
+    .actions-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .actions-row .btn {
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+      </svg>
+      Giveaway Picker
+    </h1>
+    <div class="subtitle">Free • No API Required</div>
+  </div>
+
+  <div class="content">
+    <!-- Error message -->
+    <div id="error" class="error-msg hidden"></div>
+
+    <!-- Step 1: Tweet URL -->
+    <div class="section" id="step-tweet">
+      <div class="section-title">
+        <span>1</span> Tweet URL
+      </div>
+      <div class="tweet-input">
+        <input type="text" id="tweet-url" placeholder="Paste tweet URL or click on tweet page">
+        <button class="btn btn-secondary" id="detect-btn">Detect</button>
+      </div>
+    </div>
+
+    <!-- Step 2: Requirements -->
+    <div class="section" id="step-requirements">
+      <div class="section-title">
+        <span>2</span> Requirements
+      </div>
+
+      <div class="requirement-row">
+        <label class="requirement-label">
+          <input type="checkbox" id="req-retweet" checked>
+          Must Retweet
+        </label>
+        <span class="requirement-status status-idle" id="status-retweet">Not collected</span>
+      </div>
+
+      <div class="requirement-row">
+        <label class="requirement-label">
+          <input type="checkbox" id="req-like" checked>
+          Must Like
+        </label>
+        <span class="requirement-status status-idle" id="status-like">Not collected</span>
+      </div>
+
+      <div class="requirement-row" style="flex-direction: column; align-items: stretch;">
+        <label class="requirement-label" style="margin-bottom: 8px;">
+          <input type="checkbox" id="req-follow" checked>
+          Must Follow Accounts
+        </label>
+        <div class="follow-accounts" id="follow-accounts">
+          <div class="follow-input-row">
+            <input type="text" placeholder="@username" class="follow-input">
+            <button class="btn btn-secondary remove-follow">×</button>
+          </div>
+          <div class="follow-input-row">
+            <input type="text" placeholder="@username" class="follow-input">
+            <button class="btn btn-secondary remove-follow">×</button>
+          </div>
+        </div>
+        <span class="add-account-btn" id="add-follow-btn">+ Add another account</span>
+      </div>
+
+      <div class="collect-btn-row">
+        <button class="btn btn-primary" id="collect-all-btn">Collect All Data</button>
+      </div>
+    </div>
+
+    <!-- Step 3: Results & Pick -->
+    <div class="section" id="step-pick">
+      <div class="section-title">
+        <span>3</span> Pick Winners
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-box">
+          <div class="stat-value" id="stat-retweeters">0</div>
+          <div class="stat-label">Retweeters</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value" id="stat-likers">0</div>
+          <div class="stat-label">Likers</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value" id="stat-eligible">0</div>
+          <div class="stat-label">Eligible</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value" id="stat-filtered">0</div>
+          <div class="stat-label">After Filters</div>
+        </div>
+      </div>
+
+      <div class="winner-count-row">
+        <label>Number of Winners</label>
+        <input type="number" id="winner-count" value="1" min="1" max="100">
+      </div>
+
+      <details style="margin-bottom: 12px;">
+        <summary style="font-size: 13px; color: #536471; cursor: pointer;">Bot Filters</summary>
+        <div style="padding-top: 8px;">
+          <div class="filter-row">
+            <label>Min Followers</label>
+            <input type="number" id="filter-followers" value="10" min="0">
+          </div>
+          <div class="filter-row">
+            <label>Min Tweets</label>
+            <input type="number" id="filter-tweets" value="5" min="0">
+          </div>
+          <div class="filter-row">
+            <label>Min Account Age (days)</label>
+            <input type="number" id="filter-age" value="30" min="0">
+          </div>
+          <div class="filter-row">
+            <label>Require Profile Picture</label>
+            <input type="checkbox" id="filter-avatar" checked>
+          </div>
+        </div>
+      </details>
+
+      <button class="btn btn-success btn-full" id="pick-btn">Pick Winners</button>
+    </div>
+
+    <!-- Winners Display -->
+    <div class="section hidden" id="step-winners">
+      <div class="section-title">
+        Winners
+        <button class="btn btn-secondary copy-btn" id="copy-winners">Copy</button>
+      </div>
+      <div class="winners-list" id="winners-list"></div>
+      <div class="actions-row">
+        <button class="btn btn-secondary" id="repick-btn">Pick Again</button>
+        <button class="btn btn-primary" id="new-giveaway-btn">New Giveaway</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
