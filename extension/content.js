@@ -12,6 +12,10 @@
   // Unique message key to prevent spoofing
   const MESSAGE_KEY = 'TWITTER_PICKER_' + Math.random().toString(36).slice(2);
 
+  // Buffer for API responses received before we know if we're collecting
+  const responseBuffer = [];
+  let isInitialized = false;
+
   // Store collected data
   const collectedData = {
     retweeters: new Map(),
@@ -24,48 +28,8 @@
     collectionMutex: false
   };
 
-  // Restore data from storage on load
-  chrome.storage.local.get(['collectedData'], (result) => {
-    if (result.collectedData) {
-      const saved = result.collectedData;
-      if (saved.retweeters) {
-        saved.retweeters.forEach(u => collectedData.retweeters.set(u.username.toLowerCase(), u));
-      }
-      if (saved.likers) {
-        saved.likers.forEach(u => collectedData.likers.set(u.username.toLowerCase(), u));
-      }
-      if (saved.followers) {
-        Object.entries(saved.followers).forEach(([account, users]) => {
-          const map = new Map();
-          users.forEach(u => map.set(u.username.toLowerCase(), u));
-          collectedData.followers.set(account, map);
-        });
-      }
-      if (saved.currentTweetId) {
-        collectedData.currentTweetId = saved.currentTweetId;
-      }
-    }
-  });
-
-  // Save data to storage (debounced)
-  let saveTimeout = null;
-  function saveToStorage() {
-    if (saveTimeout) clearTimeout(saveTimeout);
-    saveTimeout = setTimeout(() => {
-      const dataToSave = {
-        retweeters: Array.from(collectedData.retweeters.values()),
-        likers: Array.from(collectedData.likers.values()),
-        followers: Object.fromEntries(
-          Array.from(collectedData.followers.entries()).map(([k, v]) => [k, Array.from(v.values())])
-        ),
-        currentTweetId: collectedData.currentTweetId
-      };
-      chrome.storage.local.set({ collectedData: dataToSave }).catch(() => {});
-    }, 500);
-  }
-
-  // Inject script to intercept fetch/XHR
-  // Uses specific origin and unique key for security
+  // Inject script FIRST - before any async operations
+  // This ensures we capture API calls from the very start
   const currentOrigin = window.location.origin;
   const injectedScript = document.createElement('script');
   injectedScript.textContent = `
@@ -124,7 +88,7 @@
   document.documentElement.appendChild(injectedScript);
   injectedScript.remove();
 
-  // Listen for intercepted API responses with origin validation
+  // Listen for intercepted API responses - start immediately, buffer until ready
   window.addEventListener('message', (event) => {
     // Security: Validate origin
     if (event.origin !== currentOrigin) return;
@@ -135,8 +99,119 @@
     // Security: Validate data structure
     if (typeof event.data.url !== 'string' || typeof event.data.data !== 'object') return;
 
+    // If not initialized yet, buffer the response
+    if (!isInitialized) {
+      responseBuffer.push({ url: event.data.url, data: event.data.data });
+      return;
+    }
+
     handleApiResponse(event.data.url, event.data.data);
   });
+
+  // Process buffered responses once we're ready
+  function processBuffer() {
+    if (!collectedData.isCollecting) return;
+
+    console.log('[Twitter Picker] Processing', responseBuffer.length, 'buffered responses');
+
+    while (responseBuffer.length > 0) {
+      const { url, data } = responseBuffer.shift();
+      handleApiResponse(url, data);
+    }
+  }
+
+  // Initialize - restore state from storage
+  async function initialize() {
+    try {
+      // Check for pending collection first
+      const pendingResult = await chrome.storage.local.get(['pendingCollection']);
+      const pending = pendingResult.pendingCollection;
+
+      if (pending) {
+        const { type, tweetId, account, startedAt } = pending;
+        const path = window.location.pathname;
+
+        // Check if too old (> 5 minutes)
+        if (startedAt && Date.now() - startedAt > 5 * 60 * 1000) {
+          await chrome.storage.local.remove('pendingCollection');
+        } else {
+          // Check if we're on the correct page
+          let isCorrectPage = false;
+          if (type === 'retweeters' && path.includes('/retweets')) isCorrectPage = true;
+          if (type === 'likers' && path.includes('/likes')) isCorrectPage = true;
+          if (type === 'followers' && path.includes('/followers')) isCorrectPage = true;
+
+          if (isCorrectPage) {
+            console.log('[Twitter Picker] Resuming collection:', type);
+
+            // Set collecting state BEFORE marking as initialized
+            collectedData.isCollecting = true;
+            collectedData.collectType = type;
+            collectedData.currentFollowAccount = account;
+            collectedData.currentTweetId = tweetId;
+          }
+        }
+      }
+
+      // Restore saved data
+      const dataResult = await chrome.storage.local.get(['collectedData']);
+      if (dataResult.collectedData) {
+        const saved = dataResult.collectedData;
+        if (saved.retweeters) {
+          saved.retweeters.forEach(u => collectedData.retweeters.set(u.username.toLowerCase(), u));
+        }
+        if (saved.likers) {
+          saved.likers.forEach(u => collectedData.likers.set(u.username.toLowerCase(), u));
+        }
+        if (saved.followers) {
+          Object.entries(saved.followers).forEach(([account, users]) => {
+            const map = new Map();
+            users.forEach(u => map.set(u.username.toLowerCase(), u));
+            collectedData.followers.set(account, map);
+          });
+        }
+        if (saved.currentTweetId) {
+          collectedData.currentTweetId = saved.currentTweetId;
+        }
+      }
+
+      // Mark as initialized and process buffer
+      isInitialized = true;
+      processBuffer();
+
+      // If we're collecting, start auto-scroll after a short delay
+      if (collectedData.isCollecting) {
+        console.log('[Twitter Picker] Starting auto-scroll for', collectedData.collectType);
+        await sleep(1500);
+        await autoScroll();
+        await finishCollection();
+      }
+
+    } catch (error) {
+      console.error('[Twitter Picker] Initialization error:', error);
+      isInitialized = true;
+    }
+  }
+
+  // Start initialization
+  initialize();
+
+  // Save data to storage (debounced)
+  let saveTimeout = null;
+  function saveToStorage() {
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => {
+      const dataToSave = {
+        retweeters: Array.from(collectedData.retweeters.values()),
+        likers: Array.from(collectedData.likers.values()),
+        followers: Object.fromEntries(
+          Array.from(collectedData.followers.entries()).map(([k, v]) => [k, Array.from(v.values())])
+        ),
+        currentTweetId: collectedData.currentTweetId
+      };
+      chrome.storage.local.set({ collectedData: dataToSave }).catch(() => {});
+    }, 300);
+  }
 
   function handleApiResponse(url, data) {
     if (!collectedData.isCollecting) return;
@@ -146,6 +221,8 @@
     const users = extractUsers(data, [], 0, 50);
 
     if (users.length > 0) {
+      console.log('[Twitter Picker] Found', users.length, 'users in response');
+
       const targetMap = getTargetMap();
       if (targetMap) {
         let added = 0;
@@ -156,6 +233,7 @@
           }
         });
         if (added > 0) {
+          console.log('[Twitter Picker] Added', added, 'new users, total:', targetMap.size);
           saveToStorage();
           updateProgress();
         }
@@ -189,26 +267,42 @@
     if (depth > maxDepth) return users;
     if (!data || typeof data !== 'object') return users;
 
-    // Check if this is a user object
-    if (data.__typename === 'User' || (data.legacy && data.rest_id)) {
+    // Check for user result wrapper (common in Twitter's GraphQL responses)
+    if (data.user_results?.result) {
+      extractUsers(data.user_results.result, users, depth + 1, maxDepth);
+    }
+
+    // Check if this is a user object - multiple patterns Twitter uses
+    const isUserObject =
+      data.__typename === 'User' ||
+      data.__typename === 'UserResults' ||
+      (data.legacy && data.rest_id) ||
+      (data.legacy && data.id_str) ||
+      (data.screen_name && (data.id_str || data.id));
+
+    if (isUserObject) {
       const legacy = data.legacy || data;
       const username = legacy.screen_name || data.screen_name;
 
       // Security: Validate and sanitize username
       if (username && typeof username === 'string' && /^[a-zA-Z0-9_]{1,15}$/.test(username)) {
-        const user = {
-          id: String(data.rest_id || data.id_str || data.id || ''),
-          username: username,
-          displayName: sanitizeString(legacy.name || data.name),
-          avatarUrl: sanitizeUrl(legacy.profile_image_url_https || data.profile_image_url_https),
-          bio: sanitizeString(legacy.description || data.description),
-          followerCount: sanitizeNumber(legacy.followers_count ?? data.followers_count),
-          followingCount: sanitizeNumber(legacy.friends_count ?? data.friends_count),
-          tweetCount: sanitizeNumber(legacy.statuses_count ?? data.statuses_count),
-          isVerified: Boolean(legacy.verified || data.verified || data.is_blue_verified),
-          createdAt: sanitizeString(legacy.created_at || data.created_at)
-        };
-        users.push(user);
+        // Avoid duplicates within this extraction
+        const existingIndex = users.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
+        if (existingIndex === -1) {
+          const user = {
+            id: String(data.rest_id || data.id_str || data.id || ''),
+            username: username,
+            displayName: sanitizeString(legacy.name || data.name),
+            avatarUrl: sanitizeUrl(legacy.profile_image_url_https || data.profile_image_url_https),
+            bio: sanitizeString(legacy.description || data.description),
+            followerCount: sanitizeNumber(legacy.followers_count ?? data.followers_count),
+            followingCount: sanitizeNumber(legacy.friends_count ?? data.friends_count),
+            tweetCount: sanitizeNumber(legacy.statuses_count ?? data.statuses_count),
+            isVerified: Boolean(legacy.verified || data.verified || data.is_blue_verified),
+            createdAt: sanitizeString(legacy.created_at || data.created_at)
+          };
+          users.push(user);
+        }
       }
     }
 
@@ -220,8 +314,10 @@
       }
     } else {
       for (const value of Object.values(data)) {
-        extractUsers(value, users, depth + 1, maxDepth);
-        if (users.length > 10000) break;
+        if (value && typeof value === 'object') {
+          extractUsers(value, users, depth + 1, maxDepth);
+          if (users.length > 10000) break;
+        }
       }
     }
 
@@ -240,7 +336,7 @@
     if (typeof url !== 'string') return undefined;
     try {
       const parsed = new URL(url);
-      if (parsed.protocol === 'https:' && parsed.hostname.includes('twimg.com')) {
+      if (parsed.protocol === 'https:' && (parsed.hostname.includes('twimg.com') || parsed.hostname.includes('pbs.twimg.com'))) {
         return url;
       }
     } catch (e) {}
@@ -266,21 +362,36 @@
   }
 
   // Auto-scroll function with better control
-  async function autoScroll(maxScrolls = 150) {
+  async function autoScroll(maxScrolls = 200) {
     let scrollCount = 0;
     let lastHeight = 0;
     let noChangeCount = 0;
+    let lastUserCount = getTargetMap()?.size || 0;
+    let noNewUsersCount = 0;
+
+    console.log('[Twitter Picker] Starting auto-scroll, max:', maxScrolls);
 
     while (scrollCount < maxScrolls && collectedData.isCollecting) {
+      // Scroll down
       window.scrollTo(0, document.body.scrollHeight);
-      await sleep(1200);
+
+      // Wait for content to load
+      await sleep(1000 + Math.random() * 500);
 
       const newHeight = document.body.scrollHeight;
+      const currentUserCount = getTargetMap()?.size || 0;
+
+      // Check if we got new users
+      if (currentUserCount > lastUserCount) {
+        noNewUsersCount = 0;
+        lastUserCount = currentUserCount;
+      } else {
+        noNewUsersCount++;
+      }
+
+      // Check if page height changed
       if (newHeight === lastHeight) {
         noChangeCount++;
-        if (noChangeCount >= 4) {
-          break;
-        }
       } else {
         noChangeCount = 0;
       }
@@ -288,11 +399,24 @@
       lastHeight = newHeight;
       scrollCount++;
 
-      // Update progress every 5 scrolls
-      if (scrollCount % 5 === 0) {
+      // Log progress
+      if (scrollCount % 10 === 0) {
+        console.log('[Twitter Picker] Scroll', scrollCount, '- Users:', currentUserCount);
+      }
+
+      // Stop if no new content for a while
+      if (noChangeCount >= 5 && noNewUsersCount >= 5) {
+        console.log('[Twitter Picker] No new content, stopping scroll');
+        break;
+      }
+
+      // Update progress every 3 scrolls
+      if (scrollCount % 3 === 0) {
         updateProgress();
       }
     }
+
+    console.log('[Twitter Picker] Auto-scroll complete, total scrolls:', scrollCount);
   }
 
   function sleep(ms) {
@@ -302,6 +426,28 @@
   function getCurrentTweetId() {
     const match = window.location.pathname.match(/\/status\/(\d+)/);
     return match ? match[1] : null;
+  }
+
+  async function finishCollection() {
+    const type = collectedData.collectType;
+    const account = collectedData.currentFollowAccount;
+    const count = getTargetMap()?.size || 0;
+
+    console.log('[Twitter Picker] Collection complete:', type, '- Count:', count);
+
+    collectedData.isCollecting = false;
+    collectedData.collectionMutex = false;
+
+    await chrome.storage.local.remove('pendingCollection');
+    saveToStorage();
+
+    // Send completion message
+    chrome.runtime.sendMessage({
+      type: 'COLLECTION_COMPLETE',
+      collectType: type,
+      count: count,
+      account: account
+    }).catch(() => {});
   }
 
   // Navigate and collect with mutex to prevent race conditions
@@ -321,11 +467,11 @@
       let targetUrl;
 
       if (type === 'retweeters') {
-        targetUrl = `https://twitter.com/i/status/${tweetId}/retweets`;
+        targetUrl = `https://x.com/i/status/${tweetId}/retweets`;
       } else if (type === 'likers') {
-        targetUrl = `https://twitter.com/i/status/${tweetId}/likes`;
+        targetUrl = `https://x.com/i/status/${tweetId}/likes`;
       } else if (type === 'followers' && accountUsername) {
-        targetUrl = `https://twitter.com/${accountUsername}/followers`;
+        targetUrl = `https://x.com/${accountUsername}/followers`;
       }
 
       // Store pending collection before navigation
@@ -338,34 +484,24 @@
         }
       });
 
+      console.log('[Twitter Picker] Navigating to:', targetUrl);
+
       if (targetUrl && window.location.href !== targetUrl) {
         window.location.href = targetUrl;
         return { success: true, navigating: true };
       }
 
-      // We're on the right page, start scrolling
-      await sleep(2000);
+      // We're already on the right page, start collecting
+      console.log('[Twitter Picker] Already on correct page, starting collection');
+      await sleep(1500);
       await autoScroll();
-
-      collectedData.isCollecting = false;
-      collectedData.collectionMutex = false;
-
-      // Clear pending and save final data
-      await chrome.storage.local.remove('pendingCollection');
-      saveToStorage();
+      await finishCollection();
 
       const count = getTargetMap()?.size || 0;
-
-      // Send completion message
-      chrome.runtime.sendMessage({
-        type: 'COLLECTION_COMPLETE',
-        collectType: type,
-        count: count,
-        account: accountUsername
-      }).catch(() => {});
-
       return { success: true, count };
+
     } catch (error) {
+      console.error('[Twitter Picker] Collection error:', error);
       collectedData.isCollecting = false;
       collectedData.collectionMutex = false;
       return { success: false, error: error.message };
@@ -453,48 +589,6 @@
         sendResponse({ success: false, error: 'Unknown message type' });
     }
     return true;
-  });
-
-  // Resume collection if pending
-  chrome.storage.local.get(['pendingCollection'], (result) => {
-    if (result.pendingCollection) {
-      const { type, tweetId, account, startedAt } = result.pendingCollection;
-      const path = window.location.pathname;
-
-      // Check if too old (> 5 minutes)
-      if (startedAt && Date.now() - startedAt > 5 * 60 * 1000) {
-        chrome.storage.local.remove('pendingCollection');
-        return;
-      }
-
-      let isCorrectPage = false;
-      if (type === 'retweeters' && path.includes('/retweets')) isCorrectPage = true;
-      if (type === 'likers' && path.includes('/likes')) isCorrectPage = true;
-      if (type === 'followers' && path.includes('/followers')) isCorrectPage = true;
-
-      if (isCorrectPage) {
-        collectedData.isCollecting = true;
-        collectedData.collectType = type;
-        collectedData.currentFollowAccount = account;
-        collectedData.currentTweetId = tweetId;
-
-        sleep(2000).then(async () => {
-          await autoScroll();
-          collectedData.isCollecting = false;
-          collectedData.collectionMutex = false;
-
-          await chrome.storage.local.remove('pendingCollection');
-          saveToStorage();
-
-          chrome.runtime.sendMessage({
-            type: 'COLLECTION_COMPLETE',
-            collectType: type,
-            count: getTargetMap()?.size || 0,
-            account: account
-          }).catch(() => {});
-        });
-      }
-    }
   });
 
 })();
