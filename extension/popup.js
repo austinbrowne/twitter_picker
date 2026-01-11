@@ -1,5 +1,8 @@
 /**
  * Popup script - main UI logic
+ *
+ * Security: Uses textContent/createElement instead of innerHTML
+ * UX: Sequential collection with progress feedback
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -12,6 +15,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const followAccountsContainer = document.getElementById('follow-accounts');
   const addFollowBtn = document.getElementById('add-follow-btn');
   const collectAllBtn = document.getElementById('collect-all-btn');
+  const stopBtn = document.getElementById('stop-btn');
   const pickBtn = document.getElementById('pick-btn');
   const winnerCountInput = document.getElementById('winner-count');
   const winnersSection = document.getElementById('step-winners');
@@ -20,10 +24,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   const repickBtn = document.getElementById('repick-btn');
   const newGiveawayBtn = document.getElementById('new-giveaway-btn');
   const errorDiv = document.getElementById('error');
+  const progressDiv = document.getElementById('progress-info');
+  const progressText = document.getElementById('progress-text');
 
   // Stats elements
   const statRetweeters = document.getElementById('stat-retweeters');
   const statLikers = document.getElementById('stat-likers');
+  const statFollowers = document.getElementById('stat-followers');
   const statEligible = document.getElementById('stat-eligible');
   const statFiltered = document.getElementById('stat-filtered');
 
@@ -38,30 +45,39 @@ document.addEventListener('DOMContentLoaded', async () => {
     likers: [],
     followers: {},
     eligible: [],
-    winners: []
+    winners: [],
+    isCollecting: false,
+    currentCollection: null
   };
 
+  // Collection queue for sequential processing
+  let collectionQueue = [];
+  let isProcessingQueue = false;
+
   // Load saved state
-  const savedState = await chrome.storage.local.get(['giveawayState']);
-  if (savedState.giveawayState) {
-    state = savedState.giveawayState;
-    updateUI();
-  }
+  await loadState();
+  updateUI();
 
   // Try to detect tweet from current tab
   detectCurrentTweet();
 
+  // Poll for updates while collecting
+  setInterval(async () => {
+    if (state.isCollecting) {
+      await fetchCollectedData();
+      updateUI();
+    }
+  }, 2000);
+
   // Event listeners
   detectBtn.addEventListener('click', detectCurrentTweet);
 
-  addFollowBtn.addEventListener('click', () => {
-    addFollowInput();
-  });
+  addFollowBtn.addEventListener('click', () => addFollowInput());
 
   followAccountsContainer.addEventListener('click', (e) => {
     if (e.target.classList.contains('remove-follow')) {
       const row = e.target.closest('.follow-input-row');
-      if (followAccountsContainer.children.length > 1) {
+      if (followAccountsContainer.querySelectorAll('.follow-input-row').length > 1) {
         row.remove();
       } else {
         row.querySelector('input').value = '';
@@ -69,7 +85,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  collectAllBtn.addEventListener('click', collectAll);
+  collectAllBtn.addEventListener('click', startCollection);
+  stopBtn.addEventListener('click', stopCollection);
   pickBtn.addEventListener('click', pickWinners);
   copyWinnersBtn.addEventListener('click', copyWinners);
   repickBtn.addEventListener('click', pickWinners);
@@ -79,52 +96,107 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.runtime.onMessage.addListener((message) => {
     if (message.type === 'COLLECTION_PROGRESS') {
       updateCollectionStatus(message.collectType, 'collecting', message.count, message.account);
+      showProgress(`Collecting ${message.collectType}: ${message.count} found...`);
     } else if (message.type === 'COLLECTION_COMPLETE') {
       updateCollectionStatus(message.collectType, 'complete', message.count, message.account);
-      // Fetch the collected data
-      fetchCollectedData();
+      fetchCollectedData().then(() => {
+        processNextInQueue();
+      });
     }
   });
 
   // Functions
+  async function loadState() {
+    try {
+      const saved = await chrome.storage.local.get(['giveawayState', 'collectedData']);
+
+      if (saved.giveawayState) {
+        state = { ...state, ...saved.giveawayState };
+      }
+
+      if (saved.collectedData) {
+        state.retweeters = saved.collectedData.retweeters || [];
+        state.likers = saved.collectedData.likers || [];
+        state.followers = saved.collectedData.followers || {};
+        state.tweetId = saved.collectedData.currentTweetId || state.tweetId;
+      }
+    } catch (e) {
+      console.error('Error loading state:', e);
+    }
+  }
+
+  async function saveState() {
+    try {
+      await chrome.storage.local.set({
+        giveawayState: {
+          tweetId: state.tweetId,
+          winners: state.winners,
+          eligible: state.eligible
+        }
+      });
+    } catch (e) {
+      console.error('Error saving state:', e);
+    }
+  }
+
   async function detectCurrentTweet() {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+      if (!tab?.url) {
+        showError('Cannot access current tab');
+        return;
+      }
 
       if (!tab.url.includes('twitter.com') && !tab.url.includes('x.com')) {
         showError('Please open a Twitter/X page');
         return;
       }
 
-      const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_TWEET_ID' });
+      // Try to get tweet ID from content script
+      try {
+        const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_TWEET_ID' });
+        if (response?.tweetId) {
+          state.tweetId = response.tweetId;
+          tweetUrlInput.value = tab.url;
+          hideError();
+          return;
+        }
+      } catch (e) {
+        // Content script not loaded, try URL parsing
+      }
 
-      if (response?.tweetId) {
-        state.tweetId = response.tweetId;
+      // Extract from URL
+      const match = tab.url.match(/\/status\/(\d+)/);
+      if (match) {
+        state.tweetId = match[1];
         tweetUrlInput.value = tab.url;
         hideError();
       } else {
-        // Try to extract from URL
-        const match = tab.url.match(/\/status\/(\d+)/);
-        if (match) {
-          state.tweetId = match[1];
-          tweetUrlInput.value = tab.url;
-          hideError();
-        } else {
-          showError('Navigate to a tweet to detect it');
-        }
+        showError('Navigate to a tweet to detect it');
       }
     } catch (e) {
-      showError('Could not detect tweet. Make sure you\'re on a tweet page.');
+      showError('Could not detect tweet. Refresh the page and try again.');
     }
   }
 
   function addFollowInput() {
     const row = document.createElement('div');
     row.className = 'follow-input-row';
-    row.innerHTML = `
-      <input type="text" placeholder="@username" class="follow-input">
-      <button class="btn btn-secondary remove-follow">×</button>
-    `;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '@username';
+    input.className = 'follow-input';
+    input.setAttribute('aria-label', 'Account username to follow');
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn btn-secondary remove-follow';
+    removeBtn.textContent = '×';
+    removeBtn.setAttribute('aria-label', 'Remove this account');
+
+    row.appendChild(input);
+    row.appendChild(removeBtn);
     followAccountsContainer.appendChild(row);
   }
 
@@ -132,12 +204,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     const inputs = followAccountsContainer.querySelectorAll('.follow-input');
     return Array.from(inputs)
       .map(input => input.value.trim().replace(/^@/, '').toLowerCase())
-      .filter(v => v.length > 0);
+      .filter(v => v.length > 0 && /^[a-zA-Z0-9_]{1,15}$/.test(v));
   }
 
-  async function collectAll() {
+  async function startCollection() {
+    // Validate tweet ID
     if (!state.tweetId) {
-      // Try to extract from input
       const match = tweetUrlInput.value.match(/\/status\/(\d+)/);
       if (match) {
         state.tweetId = match[1];
@@ -147,36 +219,96 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    collectAllBtn.disabled = true;
-    collectAllBtn.textContent = 'Collecting...';
     hideError();
+    state.isCollecting = true;
+    collectionQueue = [];
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // Build collection queue
+    if (reqRetweet.checked) {
+      collectionQueue.push({ type: 'retweeters', tweetId: state.tweetId });
+    }
+    if (reqLike.checked) {
+      collectionQueue.push({ type: 'likers', tweetId: state.tweetId });
+    }
+    if (reqFollow.checked) {
+      const accounts = getFollowAccounts();
+      for (const account of accounts) {
+        collectionQueue.push({ type: 'followers', tweetId: state.tweetId, account });
+      }
+    }
+
+    if (collectionQueue.length === 0) {
+      showError('Select at least one requirement');
+      state.isCollecting = false;
+      return;
+    }
+
+    // Update UI
+    collectAllBtn.classList.add('hidden');
+    stopBtn.classList.remove('hidden');
+    showProgress('Starting collection...');
+
+    // Process queue
+    isProcessingQueue = true;
+    processNextInQueue();
+  }
+
+  async function processNextInQueue() {
+    if (collectionQueue.length === 0 || !state.isCollecting) {
+      // All done
+      state.isCollecting = false;
+      isProcessingQueue = false;
+      collectAllBtn.classList.remove('hidden');
+      stopBtn.classList.add('hidden');
+      hideProgress();
+
+      await fetchCollectedData();
+      updateUI();
+
+      if (state.retweeters.length > 0 || state.likers.length > 0) {
+        showSuccess('Collection complete!');
+      }
+      return;
+    }
+
+    const next = collectionQueue.shift();
+    state.currentCollection = next;
+
+    showProgress(`Collecting ${next.type}${next.account ? ` (@${next.account})` : ''}...`);
+    updateCollectionStatus(next.type, 'collecting', 0, next.account);
 
     try {
-      // Collect retweeters first
-      if (reqRetweet.checked) {
-        updateCollectionStatus('retweeters', 'collecting', 0);
-        await chrome.storage.local.set({
-          pendingCollection: { type: 'retweeters', tweetId: state.tweetId }
-        });
-        await chrome.tabs.sendMessage(tab.id, {
-          type: 'START_COLLECT',
-          collectType: 'retweeters',
-          tweetId: state.tweetId
-        });
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-        // Wait for collection to complete (popup might close during navigation)
-        // The content script will continue and save data
-      }
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'START_COLLECT',
+        collectType: next.type,
+        tweetId: next.tweetId,
+        accountUsername: next.account
+      });
 
-      showError('Collection started. The page will navigate to collect data. Re-open this popup when done.');
-
+      // The content script will navigate and continue
+      // We'll get COLLECTION_COMPLETE when done
     } catch (e) {
-      showError('Error starting collection: ' + e.message);
-      collectAllBtn.disabled = false;
-      collectAllBtn.textContent = 'Collect All Data';
+      showError(`Failed to start ${next.type} collection. Refresh the page and try again.`);
+      processNextInQueue();
     }
+  }
+
+  async function stopCollection() {
+    state.isCollecting = false;
+    collectionQueue = [];
+    isProcessingQueue = false;
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      await chrome.tabs.sendMessage(tab.id, { type: 'STOP_COLLECT' });
+    } catch (e) {}
+
+    collectAllBtn.classList.remove('hidden');
+    stopBtn.classList.add('hidden');
+    hideProgress();
+    updateUI();
   }
 
   async function fetchCollectedData() {
@@ -185,21 +317,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_DATA' });
 
       if (response) {
-        if (response.retweeters) {
-          state.retweeters = response.retweeters;
-        }
-        if (response.likers) {
-          state.likers = response.likers;
-        }
-        if (response.followers) {
-          state.followers = { ...state.followers, ...response.followers };
-        }
-
-        await saveState();
-        updateUI();
+        if (response.retweeters) state.retweeters = response.retweeters;
+        if (response.likers) state.likers = response.likers;
+        if (response.followers) state.followers = response.followers;
+        if (response.isCollecting !== undefined) state.isCollecting = response.isCollecting;
       }
     } catch (e) {
-      console.error('Error fetching data:', e);
+      // Content script not available, load from storage
+      await loadState();
     }
   }
 
@@ -211,8 +336,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (type === 'likers') {
       statusEl = statusLike;
     } else if (type === 'followers' && account) {
-      // Find or create status element for this account
-      // For simplicity, we'll update a general indicator
+      // Update followers count in stats
+      if (statFollowers) {
+        const totalFollowers = Object.values(state.followers).reduce((sum, arr) => sum + arr.length, 0);
+        statFollowers.textContent = totalFollowers.toLocaleString();
+      }
       return;
     }
 
@@ -223,9 +351,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (status === 'collecting') {
       statusEl.classList.add('status-collecting');
       statusEl.textContent = `Collecting... (${count})`;
+      statusEl.setAttribute('aria-live', 'polite');
     } else if (status === 'complete') {
       statusEl.classList.add('status-complete');
-      statusEl.textContent = `${count} collected`;
+      statusEl.textContent = `${count} collected ✓`;
     } else {
       statusEl.classList.add('status-idle');
       statusEl.textContent = 'Not collected';
@@ -235,30 +364,41 @@ document.addEventListener('DOMContentLoaded', async () => {
   function calculateEligible() {
     let eligibleSet = null;
 
+    // Start with retweeters if required
     if (reqRetweet.checked && state.retweeters.length > 0) {
       const set = new Set(state.retweeters.map(u => u.username.toLowerCase()));
-      eligibleSet = eligibleSet ? intersection(eligibleSet, set) : set;
+      eligibleSet = set;
     }
 
+    // Intersect with likers if required
     if (reqLike.checked && state.likers.length > 0) {
       const set = new Set(state.likers.map(u => u.username.toLowerCase()));
-      eligibleSet = eligibleSet ? intersection(eligibleSet, set) : set;
+      if (eligibleSet) {
+        eligibleSet = new Set([...eligibleSet].filter(u => set.has(u)));
+      } else {
+        eligibleSet = set;
+      }
     }
 
+    // Intersect with followers if required
     if (reqFollow.checked) {
       const accounts = getFollowAccounts();
       for (const account of accounts) {
-        const followers = state.followers[account] || [];
+        const followers = state.followers[account.toLowerCase()] || [];
         if (followers.length > 0) {
           const set = new Set(followers.map(u => u.username.toLowerCase()));
-          eligibleSet = eligibleSet ? intersection(eligibleSet, set) : set;
+          if (eligibleSet) {
+            eligibleSet = new Set([...eligibleSet].filter(u => set.has(u)));
+          } else {
+            eligibleSet = set;
+          }
         }
       }
     }
 
     if (!eligibleSet) return [];
 
-    // Build user objects
+    // Build user objects - prefer retweeter data (most complete)
     const userMap = new Map();
     [...state.likers, ...state.retweeters].forEach(u => {
       userMap.set(u.username.toLowerCase(), u);
@@ -269,11 +409,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
 
-    return Array.from(eligibleSet).map(u => userMap.get(u)).filter(Boolean);
-  }
-
-  function intersection(setA, setB) {
-    return new Set([...setA].filter(x => setB.has(x)));
+    return Array.from(eligibleSet)
+      .map(username => userMap.get(username))
+      .filter(Boolean);
   }
 
   function applyFilters(users) {
@@ -286,18 +424,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     minDate.setDate(minDate.getDate() - minAge);
 
     return users.filter(u => {
-      if (minFollowers && u.followerCount !== undefined && u.followerCount < minFollowers) {
-        return false;
+      // Filter out users with insufficient data if filters are set
+      if (minFollowers > 0) {
+        if (u.followerCount === undefined || u.followerCount < minFollowers) {
+          return false;
+        }
       }
-      if (minTweets && u.tweetCount !== undefined && u.tweetCount < minTweets) {
-        return false;
+      if (minTweets > 0) {
+        if (u.tweetCount === undefined || u.tweetCount < minTweets) {
+          return false;
+        }
       }
-      if (minAge && u.createdAt) {
-        const created = new Date(u.createdAt);
-        if (created > minDate) return false;
+      if (minAge > 0 && u.createdAt) {
+        try {
+          const created = new Date(u.createdAt);
+          if (created > minDate) return false;
+        } catch (e) {}
       }
-      if (requireAvatar && (!u.avatarUrl || u.avatarUrl.includes('default_profile'))) {
-        return false;
+      if (requireAvatar) {
+        if (!u.avatarUrl || u.avatarUrl.includes('default_profile')) {
+          return false;
+        }
       }
       return true;
     });
@@ -306,33 +453,61 @@ document.addEventListener('DOMContentLoaded', async () => {
   function pickWinners() {
     const eligible = calculateEligible();
     const filtered = applyFilters(eligible);
-    const count = parseInt(winnerCountInput.value) || 1;
+    let count = parseInt(winnerCountInput.value) || 1;
+
+    // Validate count
+    count = Math.max(1, Math.min(count, 100, filtered.length));
 
     if (filtered.length === 0) {
-      showError('No eligible participants found. Collect more data first.');
+      if (eligible.length === 0) {
+        showError('No eligible participants. Make sure to collect data first and check that users meet all requirements.');
+      } else {
+        showError(`All ${eligible.length} eligible participants were filtered out. Try relaxing your filters.`);
+      }
       return;
     }
 
-    // Crypto shuffle
-    const shuffled = cryptoShuffle(filtered);
-    state.winners = shuffled.slice(0, Math.min(count, shuffled.length));
+    if (count > filtered.length) {
+      showWarning(`Only ${filtered.length} participants after filters. Picking all of them.`);
+      count = filtered.length;
+    }
+
+    hideError();
+
+    // Crypto shuffle using rejection sampling for unbiased results
+    const shuffled = unbiasedShuffle(filtered);
+    state.winners = shuffled.slice(0, count);
     state.eligible = eligible;
 
     displayWinners();
     saveState();
   }
 
-  function cryptoShuffle(array) {
+  // Unbiased Fisher-Yates shuffle
+  function unbiasedShuffle(array) {
     const result = [...array];
-    const randomValues = new Uint32Array(result.length);
-    crypto.getRandomValues(randomValues);
 
     for (let i = result.length - 1; i > 0; i--) {
-      const j = randomValues[i] % (i + 1);
+      // Generate unbiased random index
+      const j = secureRandomInt(i + 1);
       [result[i], result[j]] = [result[j], result[i]];
     }
 
     return result;
+  }
+
+  // Generate unbiased random integer using rejection sampling
+  function secureRandomInt(max) {
+    const randomBuffer = new Uint32Array(1);
+    const maxValid = Math.floor(0xFFFFFFFF / max) * max;
+
+    let value;
+    do {
+      crypto.getRandomValues(randomBuffer);
+      value = randomBuffer[0];
+    } while (value >= maxValid);
+
+    return value % max;
   }
 
   function displayWinners() {
@@ -341,30 +516,56 @@ document.addEventListener('DOMContentLoaded', async () => {
     state.winners.forEach((winner, index) => {
       const item = document.createElement('div');
       item.className = 'winner-item';
-      item.innerHTML = `
-        <div class="winner-rank">${index + 1}</div>
-        <div class="winner-info">
-          <a href="https://twitter.com/${winner.username}" target="_blank" class="winner-link">
-            <span class="winner-username">@${winner.username}</span>
-          </a>
-          <div class="winner-meta">
-            ${winner.followerCount !== undefined ? winner.followerCount.toLocaleString() + ' followers' : ''}
-          </div>
-        </div>
-      `;
+
+      const rank = document.createElement('div');
+      rank.className = 'winner-rank';
+      rank.textContent = index + 1;
+
+      const info = document.createElement('div');
+      info.className = 'winner-info';
+
+      const link = document.createElement('a');
+      link.href = `https://twitter.com/${encodeURIComponent(winner.username)}`;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.className = 'winner-link';
+
+      const username = document.createElement('span');
+      username.className = 'winner-username';
+      username.textContent = '@' + winner.username;
+      link.appendChild(username);
+
+      info.appendChild(link);
+
+      if (winner.followerCount !== undefined) {
+        const meta = document.createElement('div');
+        meta.className = 'winner-meta';
+        meta.textContent = winner.followerCount.toLocaleString() + ' followers';
+        info.appendChild(meta);
+      }
+
+      item.appendChild(rank);
+      item.appendChild(info);
       winnersList.appendChild(item);
     });
 
     winnersSection.classList.remove('hidden');
   }
 
-  function copyWinners() {
+  async function copyWinners() {
     const text = state.winners.map((w, i) => `${i + 1}. @${w.username}`).join('\n');
-    navigator.clipboard.writeText(text);
-    copyWinnersBtn.textContent = 'Copied!';
-    setTimeout(() => {
-      copyWinnersBtn.textContent = 'Copy';
-    }, 2000);
+
+    try {
+      await navigator.clipboard.writeText(text);
+      copyWinnersBtn.textContent = 'Copied!';
+      copyWinnersBtn.classList.add('btn-success');
+      setTimeout(() => {
+        copyWinnersBtn.textContent = 'Copy';
+        copyWinnersBtn.classList.remove('btn-success');
+      }, 2000);
+    } catch (e) {
+      showError('Failed to copy. Try selecting and copying manually.');
+    }
   }
 
   async function resetGiveaway() {
@@ -374,28 +575,50 @@ document.addEventListener('DOMContentLoaded', async () => {
       likers: [],
       followers: {},
       eligible: [],
-      winners: []
+      winners: [],
+      isCollecting: false,
+      currentCollection: null
     };
 
-    await chrome.storage.local.remove(['giveawayState', 'pendingCollection']);
+    collectionQueue = [];
+    isProcessingQueue = false;
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     try {
+      await chrome.storage.local.remove(['giveawayState', 'collectedData', 'pendingCollection']);
+
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       await chrome.tabs.sendMessage(tab.id, { type: 'CLEAR_DATA' });
     } catch (e) {}
 
     tweetUrlInput.value = '';
     winnersSection.classList.add('hidden');
+    collectAllBtn.classList.remove('hidden');
+    stopBtn.classList.add('hidden');
+
+    // Reset status indicators
+    if (statusRetweet) {
+      statusRetweet.className = 'requirement-status status-idle';
+      statusRetweet.textContent = 'Not collected';
+    }
+    if (statusLike) {
+      statusLike.className = 'requirement-status status-idle';
+      statusLike.textContent = 'Not collected';
+    }
+
     updateUI();
     hideError();
-    collectAllBtn.disabled = false;
-    collectAllBtn.textContent = 'Collect All Data';
+    hideProgress();
   }
 
   function updateUI() {
     // Update stats
     statRetweeters.textContent = state.retweeters.length.toLocaleString();
     statLikers.textContent = state.likers.length.toLocaleString();
+
+    if (statFollowers) {
+      const totalFollowers = Object.values(state.followers).reduce((sum, arr) => sum + arr.length, 0);
+      statFollowers.textContent = totalFollowers.toLocaleString();
+    }
 
     const eligible = calculateEligible();
     const filtered = applyFilters(eligible);
@@ -413,18 +636,51 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Enable/disable pick button
     pickBtn.disabled = filtered.length === 0;
-  }
 
-  async function saveState() {
-    await chrome.storage.local.set({ giveawayState: state });
+    // Update buttons based on collection state
+    if (state.isCollecting) {
+      collectAllBtn.classList.add('hidden');
+      stopBtn.classList.remove('hidden');
+    } else {
+      collectAllBtn.classList.remove('hidden');
+      stopBtn.classList.add('hidden');
+    }
   }
 
   function showError(msg) {
     errorDiv.textContent = msg;
+    errorDiv.className = 'message error-msg';
     errorDiv.classList.remove('hidden');
+    errorDiv.setAttribute('role', 'alert');
+  }
+
+  function showWarning(msg) {
+    errorDiv.textContent = msg;
+    errorDiv.className = 'message warning-msg';
+    errorDiv.classList.remove('hidden');
+  }
+
+  function showSuccess(msg) {
+    errorDiv.textContent = msg;
+    errorDiv.className = 'message success-msg';
+    errorDiv.classList.remove('hidden');
+    setTimeout(hideError, 3000);
   }
 
   function hideError() {
     errorDiv.classList.add('hidden');
+  }
+
+  function showProgress(msg) {
+    if (progressDiv && progressText) {
+      progressText.textContent = msg;
+      progressDiv.classList.remove('hidden');
+    }
+  }
+
+  function hideProgress() {
+    if (progressDiv) {
+      progressDiv.classList.add('hidden');
+    }
   }
 });

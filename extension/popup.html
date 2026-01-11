@@ -369,6 +369,37 @@
     .actions-row .btn {
       flex: 1;
     }
+
+    .btn-danger {
+      background: #dc2626;
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #b91c1c;
+    }
+
+    .progress-info {
+      background: #fffbeb;
+      border: 1px solid #fcd34d;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      text-align: center;
+    }
+
+    .progress-info .progress-text {
+      font-size: 13px;
+      color: #92400e;
+      margin-bottom: 8px;
+    }
+
+    .stats-grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 8px;
+    }
   </style>
 </head>
 <body>
@@ -392,8 +423,8 @@
         <span>1</span> Tweet URL
       </div>
       <div class="tweet-input">
-        <input type="text" id="tweet-url" placeholder="Paste tweet URL or click on tweet page">
-        <button class="btn btn-secondary" id="detect-btn">Detect</button>
+        <input type="text" id="tweet-url" placeholder="Paste tweet URL or click on tweet page" aria-label="Tweet URL">
+        <button class="btn btn-secondary" id="detect-btn" aria-label="Detect tweet from current page">Detect</button>
       </div>
     </div>
 
@@ -438,7 +469,12 @@
       </div>
 
       <div class="collect-btn-row">
-        <button class="btn btn-primary" id="collect-all-btn">Collect All Data</button>
+        <button class="btn btn-primary" id="collect-all-btn" aria-label="Start collecting data from Twitter">Collect All Data</button>
+      </div>
+
+      <div id="progress-info" class="progress-info hidden" role="status" aria-live="polite">
+        <div id="progress-text" class="progress-text">Collecting...</div>
+        <button class="btn btn-danger" id="stop-btn" aria-label="Stop data collection">Stop Collection</button>
       </div>
     </div>
 
@@ -448,48 +484,54 @@
         <span>3</span> Pick Winners
       </div>
 
-      <div class="stats-grid">
+      <div class="stats-grid-3" role="group" aria-label="Collection statistics">
         <div class="stat-box">
-          <div class="stat-value" id="stat-retweeters">0</div>
+          <div class="stat-value" id="stat-retweeters" aria-label="Retweeters count">0</div>
           <div class="stat-label">Retweeters</div>
         </div>
         <div class="stat-box">
-          <div class="stat-value" id="stat-likers">0</div>
+          <div class="stat-value" id="stat-likers" aria-label="Likers count">0</div>
           <div class="stat-label">Likers</div>
         </div>
         <div class="stat-box">
-          <div class="stat-value" id="stat-eligible">0</div>
+          <div class="stat-value" id="stat-followers" aria-label="Followers count">0</div>
+          <div class="stat-label">Followers</div>
+        </div>
+      </div>
+      <div class="stats-grid" role="group" aria-label="Eligibility statistics">
+        <div class="stat-box">
+          <div class="stat-value" id="stat-eligible" aria-label="Eligible participants">0</div>
           <div class="stat-label">Eligible</div>
         </div>
         <div class="stat-box">
-          <div class="stat-value" id="stat-filtered">0</div>
+          <div class="stat-value" id="stat-filtered" aria-label="Filtered participants">0</div>
           <div class="stat-label">After Filters</div>
         </div>
       </div>
 
       <div class="winner-count-row">
-        <label>Number of Winners</label>
-        <input type="number" id="winner-count" value="1" min="1" max="100">
+        <label for="winner-count">Number of Winners</label>
+        <input type="number" id="winner-count" value="1" min="1" max="100" aria-label="Number of winners to pick">
       </div>
 
       <details style="margin-bottom: 12px;">
         <summary style="font-size: 13px; color: #536471; cursor: pointer;">Bot Filters</summary>
         <div style="padding-top: 8px;">
           <div class="filter-row">
-            <label>Min Followers</label>
-            <input type="number" id="filter-followers" value="10" min="0">
+            <label for="filter-followers">Min Followers</label>
+            <input type="number" id="filter-followers" value="10" min="0" aria-label="Minimum follower count">
           </div>
           <div class="filter-row">
-            <label>Min Tweets</label>
-            <input type="number" id="filter-tweets" value="5" min="0">
+            <label for="filter-tweets">Min Tweets</label>
+            <input type="number" id="filter-tweets" value="5" min="0" aria-label="Minimum tweet count">
           </div>
           <div class="filter-row">
-            <label>Min Account Age (days)</label>
-            <input type="number" id="filter-age" value="30" min="0">
+            <label for="filter-age">Min Account Age (days)</label>
+            <input type="number" id="filter-age" value="30" min="0" aria-label="Minimum account age in days">
           </div>
           <div class="filter-row">
-            <label>Require Profile Picture</label>
-            <input type="checkbox" id="filter-avatar" checked>
+            <label for="filter-avatar">Require Profile Picture</label>
+            <input type="checkbox" id="filter-avatar" checked aria-label="Require profile picture">
           </div>
         </div>
       </details>

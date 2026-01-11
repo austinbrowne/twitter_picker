@@ -1,9 +1,12 @@
 /**
  * Background service worker
  * Manages state and coordinates between popup and content scripts
+ *
+ * Security: Validates all message inputs
+ * State: Persists to chrome.storage to survive service worker restarts
  */
 
-// Global state
+// Global state - will be restored from storage
 let giveawayData = {
   tweetId: null,
   tweetUrl: null,
@@ -24,99 +27,210 @@ let giveawayData = {
   }
 };
 
+// Restore state from storage on service worker start
+chrome.storage.local.get(['giveawayData'], (result) => {
+  if (result.giveawayData) {
+    giveawayData = result.giveawayData;
+  }
+});
+
+// Save state to storage (debounced)
+let saveTimeout = null;
+function saveToStorage() {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(() => {
+    chrome.storage.local.set({ giveawayData }).catch(() => {});
+  }, 500);
+}
+
+// Input validation helpers
+function isValidString(val) {
+  return typeof val === 'string' && val.length < 1000;
+}
+
+function isValidUsername(val) {
+  return typeof val === 'string' && /^[a-zA-Z0-9_]{1,15}$/.test(val);
+}
+
+function isValidTweetId(val) {
+  return typeof val === 'string' && /^\d{1,25}$/.test(val);
+}
+
+function isValidUrl(val) {
+  if (typeof val !== 'string') return false;
+  try {
+    const url = new URL(val);
+    return url.protocol === 'https:' &&
+           (url.hostname === 'twitter.com' || url.hostname === 'x.com');
+  } catch {
+    return false;
+  }
+}
+
+function isValidUserArray(val) {
+  if (!Array.isArray(val)) return false;
+  if (val.length > 50000) return false; // Reasonable limit
+  return val.every(u => u && typeof u === 'object' && isValidUsername(u.username));
+}
+
+function isValidNumber(val) {
+  return typeof val === 'number' && Number.isFinite(val) && val >= 0;
+}
+
 // Listen for messages
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  switch (message.type) {
-    case 'GET_STATE':
-      sendResponse(giveawayData);
-      break;
+  // Validate message structure
+  if (!message || typeof message.type !== 'string') {
+    sendResponse({ success: false, error: 'Invalid message' });
+    return true;
+  }
 
-    case 'SET_TWEET':
-      giveawayData.tweetId = message.tweetId;
-      giveawayData.tweetUrl = message.tweetUrl;
-      sendResponse({ success: true });
-      break;
+  try {
+    switch (message.type) {
+      case 'GET_STATE':
+        sendResponse(giveawayData);
+        break;
 
-    case 'SET_REQUIREMENTS':
-      giveawayData.requirements = message.requirements;
-      sendResponse({ success: true });
-      break;
-
-    case 'UPDATE_RETWEETERS':
-      giveawayData.retweeters = message.users;
-      giveawayData.collectionStatus.retweeters = 'complete';
-      sendResponse({ success: true });
-      break;
-
-    case 'UPDATE_LIKERS':
-      giveawayData.likers = message.users;
-      giveawayData.collectionStatus.likers = 'complete';
-      sendResponse({ success: true });
-      break;
-
-    case 'UPDATE_FOLLOWERS':
-      giveawayData.followers[message.account] = message.users;
-      giveawayData.collectionStatus.followers[message.account] = 'complete';
-      sendResponse({ success: true });
-      break;
-
-    case 'COLLECTION_PROGRESS':
-      if (message.collectType === 'retweeters') {
-        giveawayData.collectionStatus.retweeters = 'collecting';
-      } else if (message.collectType === 'likers') {
-        giveawayData.collectionStatus.likers = 'collecting';
-      } else if (message.collectType === 'followers' && message.account) {
-        giveawayData.collectionStatus.followers[message.account] = 'collecting';
-      }
-      // Broadcast to popup
-      chrome.runtime.sendMessage(message).catch(() => {});
-      break;
-
-    case 'COLLECTION_COMPLETE':
-      if (message.collectType === 'retweeters') {
-        giveawayData.collectionStatus.retweeters = 'complete';
-      } else if (message.collectType === 'likers') {
-        giveawayData.collectionStatus.likers = 'complete';
-      } else if (message.collectType === 'followers' && message.account) {
-        giveawayData.collectionStatus.followers[message.account] = 'complete';
-      }
-      // Broadcast to popup
-      chrome.runtime.sendMessage(message).catch(() => {});
-      break;
-
-    case 'CALCULATE_ELIGIBLE':
-      giveawayData.eligible = calculateEligible();
-      sendResponse({ eligible: giveawayData.eligible });
-      break;
-
-    case 'PICK_WINNERS':
-      const winners = pickWinners(message.count, message.filters);
-      giveawayData.winners = winners;
-      sendResponse({ winners });
-      break;
-
-    case 'RESET':
-      giveawayData = {
-        tweetId: null,
-        tweetUrl: null,
-        retweeters: [],
-        likers: [],
-        followers: {},
-        requirements: {
-          mustRetweet: true,
-          mustLike: true,
-          mustFollow: []
-        },
-        eligible: [],
-        winners: [],
-        collectionStatus: {
-          retweeters: 'idle',
-          likers: 'idle',
-          followers: {}
+      case 'SET_TWEET':
+        if (!isValidTweetId(message.tweetId)) {
+          sendResponse({ success: false, error: 'Invalid tweet ID' });
+          break;
         }
-      };
-      sendResponse({ success: true });
-      break;
+        if (message.tweetUrl && !isValidUrl(message.tweetUrl)) {
+          sendResponse({ success: false, error: 'Invalid tweet URL' });
+          break;
+        }
+        giveawayData.tweetId = message.tweetId;
+        giveawayData.tweetUrl = message.tweetUrl || null;
+        saveToStorage();
+        sendResponse({ success: true });
+        break;
+
+      case 'SET_REQUIREMENTS':
+        if (!message.requirements || typeof message.requirements !== 'object') {
+          sendResponse({ success: false, error: 'Invalid requirements' });
+          break;
+        }
+        const req = message.requirements;
+        giveawayData.requirements = {
+          mustRetweet: Boolean(req.mustRetweet),
+          mustLike: Boolean(req.mustLike),
+          mustFollow: Array.isArray(req.mustFollow)
+            ? req.mustFollow.filter(isValidUsername).map(u => u.toLowerCase())
+            : []
+        };
+        saveToStorage();
+        sendResponse({ success: true });
+        break;
+
+      case 'UPDATE_RETWEETERS':
+        if (!isValidUserArray(message.users)) {
+          sendResponse({ success: false, error: 'Invalid users array' });
+          break;
+        }
+        giveawayData.retweeters = message.users;
+        giveawayData.collectionStatus.retweeters = 'complete';
+        saveToStorage();
+        sendResponse({ success: true });
+        break;
+
+      case 'UPDATE_LIKERS':
+        if (!isValidUserArray(message.users)) {
+          sendResponse({ success: false, error: 'Invalid users array' });
+          break;
+        }
+        giveawayData.likers = message.users;
+        giveawayData.collectionStatus.likers = 'complete';
+        saveToStorage();
+        sendResponse({ success: true });
+        break;
+
+      case 'UPDATE_FOLLOWERS':
+        if (!isValidUsername(message.account)) {
+          sendResponse({ success: false, error: 'Invalid account' });
+          break;
+        }
+        if (!isValidUserArray(message.users)) {
+          sendResponse({ success: false, error: 'Invalid users array' });
+          break;
+        }
+        const accountKey = message.account.toLowerCase();
+        giveawayData.followers[accountKey] = message.users;
+        giveawayData.collectionStatus.followers[accountKey] = 'complete';
+        saveToStorage();
+        sendResponse({ success: true });
+        break;
+
+      case 'COLLECTION_PROGRESS':
+        if (message.collectType === 'retweeters') {
+          giveawayData.collectionStatus.retweeters = 'collecting';
+        } else if (message.collectType === 'likers') {
+          giveawayData.collectionStatus.likers = 'collecting';
+        } else if (message.collectType === 'followers' && isValidUsername(message.account)) {
+          giveawayData.collectionStatus.followers[message.account.toLowerCase()] = 'collecting';
+        }
+        // Broadcast to popup
+        chrome.runtime.sendMessage(message).catch(() => {});
+        break;
+
+      case 'COLLECTION_COMPLETE':
+        if (message.collectType === 'retweeters') {
+          giveawayData.collectionStatus.retweeters = 'complete';
+        } else if (message.collectType === 'likers') {
+          giveawayData.collectionStatus.likers = 'complete';
+        } else if (message.collectType === 'followers' && isValidUsername(message.account)) {
+          giveawayData.collectionStatus.followers[message.account.toLowerCase()] = 'complete';
+        }
+        saveToStorage();
+        // Broadcast to popup
+        chrome.runtime.sendMessage(message).catch(() => {});
+        break;
+
+      case 'CALCULATE_ELIGIBLE':
+        giveawayData.eligible = calculateEligible();
+        saveToStorage();
+        sendResponse({ eligible: giveawayData.eligible });
+        break;
+
+      case 'PICK_WINNERS':
+        const count = isValidNumber(message.count) ? Math.min(message.count, 1000) : 1;
+        const filters = message.filters && typeof message.filters === 'object' ? message.filters : {};
+        const winners = pickWinners(count, filters);
+        giveawayData.winners = winners;
+        saveToStorage();
+        sendResponse({ winners });
+        break;
+
+      case 'RESET':
+        giveawayData = {
+          tweetId: null,
+          tweetUrl: null,
+          retweeters: [],
+          likers: [],
+          followers: {},
+          requirements: {
+            mustRetweet: true,
+            mustLike: true,
+            mustFollow: []
+          },
+          eligible: [],
+          winners: [],
+          collectionStatus: {
+            retweeters: 'idle',
+            likers: 'idle',
+            followers: {}
+          }
+        };
+        // Clear both background and content script storage
+        chrome.storage.local.remove(['giveawayData', 'collectedData', 'pendingCollection']).catch(() => {});
+        sendResponse({ success: true });
+        break;
+
+      default:
+        sendResponse({ success: false, error: 'Unknown message type' });
+    }
+  } catch (error) {
+    sendResponse({ success: false, error: error.message });
   }
   return true;
 });
@@ -185,53 +299,75 @@ function calculateEligible() {
 function pickWinners(count, filters = {}) {
   let candidates = [...giveawayData.eligible];
 
-  // Apply filters
-  if (filters.minFollowers) {
+  // Apply filters - FIXED: require value to be defined AND meet threshold
+  // When a filter is set, users without the data are excluded
+  if (filters.minFollowers > 0) {
     candidates = candidates.filter(u =>
-      u.followerCount === undefined || u.followerCount >= filters.minFollowers
+      typeof u.followerCount === 'number' && u.followerCount >= filters.minFollowers
     );
   }
 
-  if (filters.minTweets) {
+  if (filters.minTweets > 0) {
     candidates = candidates.filter(u =>
-      u.tweetCount === undefined || u.tweetCount >= filters.minTweets
+      typeof u.tweetCount === 'number' && u.tweetCount >= filters.minTweets
     );
   }
 
-  if (filters.minAccountAgeDays) {
+  if (filters.minAccountAgeDays > 0) {
     const minDate = new Date();
     minDate.setDate(minDate.getDate() - filters.minAccountAgeDays);
     candidates = candidates.filter(u => {
-      if (!u.createdAt) return true;
-      return new Date(u.createdAt) <= minDate;
+      if (!u.createdAt || typeof u.createdAt !== 'string') return false;
+      try {
+        return new Date(u.createdAt) <= minDate;
+      } catch {
+        return false;
+      }
     });
   }
 
   if (filters.requireAvatar) {
     candidates = candidates.filter(u =>
-      u.avatarUrl && !u.avatarUrl.includes('default_profile')
+      u.avatarUrl && typeof u.avatarUrl === 'string' && !u.avatarUrl.includes('default_profile')
     );
   }
 
-  if (filters.blacklist && filters.blacklist.length > 0) {
-    const blacklistSet = new Set(filters.blacklist.map(u => u.toLowerCase()));
+  if (filters.blacklist && Array.isArray(filters.blacklist) && filters.blacklist.length > 0) {
+    const blacklistSet = new Set(
+      filters.blacklist.filter(isValidUsername).map(u => u.toLowerCase())
+    );
     candidates = candidates.filter(u => !blacklistSet.has(u.username.toLowerCase()));
   }
 
-  // Cryptographic random shuffle
+  // Cryptographic random shuffle with rejection sampling to avoid modulo bias
   const shuffled = cryptoShuffle(candidates);
 
   return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
-// Fisher-Yates shuffle using crypto random
+// Generate unbiased random integer using rejection sampling
+function secureRandomInt(max) {
+  if (max <= 0) return 0;
+
+  // Calculate the largest multiple of max that fits in 32 bits
+  const limit = Math.floor(0x100000000 / max) * max;
+
+  let value;
+  const arr = new Uint32Array(1);
+  do {
+    crypto.getRandomValues(arr);
+    value = arr[0];
+  } while (value >= limit);
+
+  return value % max;
+}
+
+// Fisher-Yates shuffle using unbiased crypto random
 function cryptoShuffle(array) {
   const result = [...array];
-  const randomValues = new Uint32Array(result.length);
-  crypto.getRandomValues(randomValues);
 
   for (let i = result.length - 1; i > 0; i--) {
-    const j = randomValues[i] % (i + 1);
+    const j = secureRandomInt(i + 1);
     [result[i], result[j]] = [result[j], result[i]];
   }
 
