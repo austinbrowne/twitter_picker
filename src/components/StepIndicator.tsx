@@ -2,7 +2,7 @@
  * Step indicator showing progress through the giveaway flow
  */
 
-import { Fragment } from 'react';
+import React from 'react';
 import type { AppState } from '@/types';
 
 interface StepIndicatorProps {
@@ -10,31 +10,28 @@ interface StepIndicatorProps {
 }
 
 const steps: { key: AppState['step']; label: string; icon: string }[] = [
-  { key: 'setup', label: 'API Setup', icon: '1' },
-  { key: 'requirements', label: 'Requirements', icon: '2' },
-  { key: 'filter', label: 'Filters', icon: '3' },
-  { key: 'draw', label: 'Draw', icon: '4' },
-  { key: 'results', label: 'Results', icon: '5' },
+  { key: 'input', label: 'Add Participants', icon: '1' },
+  { key: 'filter', label: 'Configure Filters', icon: '2' },
+  { key: 'draw', label: 'Draw Winners', icon: '3' },
+  { key: 'results', label: 'View Results', icon: '4' },
 ];
 
 export function StepIndicator({ currentStep }: StepIndicatorProps) {
-  // Map fetching to requirements for display purposes
-  const displayStep = currentStep === 'fetching' ? 'requirements' : currentStep;
-  const currentIndex = steps.findIndex(s => s.key === displayStep);
+  const currentIndex = steps.findIndex(s => s.key === currentStep);
 
   return (
     <div className="py-6">
       <div className="flex items-center justify-center space-x-2 md:space-x-4">
         {steps.map((step, index) => {
-          const isActive = step.key === displayStep;
+          const isActive = step.key === currentStep;
           const isCompleted = index < currentIndex;
 
           return (
-            <Fragment key={step.key}>
+            <React.Fragment key={step.key}>
               {index > 0 && (
                 <div
                   className={`hidden md:block h-0.5 w-12 transition-colors ${
-                    isCompleted ? 'bg-blue-500' : 'bg-gray-300'
+                    isCompleted ? 'bg-x-blue' : 'bg-gray-300'
                   }`}
                 />
               )}
@@ -44,9 +41,9 @@ export function StepIndicator({ currentStep }: StepIndicatorProps) {
                     w-8 h-8 md:w-10 md:h-10 rounded-full flex items-center justify-center
                     font-semibold text-sm transition-all
                     ${isActive
-                      ? 'bg-blue-500 text-white ring-4 ring-blue-500/20'
+                      ? 'bg-x-blue text-white ring-4 ring-x-blue/20'
                       : isCompleted
-                      ? 'bg-blue-500 text-white'
+                      ? 'bg-x-blue text-white'
                       : 'bg-gray-200 text-gray-500'
                     }
                   `}
@@ -67,13 +64,13 @@ export function StepIndicator({ currentStep }: StepIndicatorProps) {
                 <span
                   className={`
                     mt-2 text-xs md:text-sm font-medium hidden md:block
-                    ${isActive ? 'text-blue-500' : isCompleted ? 'text-gray-700' : 'text-gray-400'}
+                    ${isActive ? 'text-x-blue' : isCompleted ? 'text-gray-700' : 'text-gray-400'}
                   `}
                 >
                   {step.label}
                 </span>
               </div>
-            </Fragment>
+            </React.Fragment>
           );
         })}
       </div>
