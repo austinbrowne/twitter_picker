@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const followAccountsContainer = document.getElementById('follow-accounts');
   const addFollowBtn = document.getElementById('add-follow-btn');
   const collectAllBtn = document.getElementById('collect-all-btn');
+  const clearDataBtn = document.getElementById('clear-data-btn');
   const stopBtn = document.getElementById('stop-btn');
   const pickBtn = document.getElementById('pick-btn');
   const winnerCountInput = document.getElementById('winner-count');
@@ -96,10 +97,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else {
         row.querySelector('input').value = '';
       }
+      saveSettings();
     }
   });
 
+  // Save follow accounts when they change
+  followAccountsContainer.addEventListener('input', () => {
+    saveSettings();
+  });
+
   collectAllBtn.addEventListener('click', startCollection);
+  clearDataBtn.addEventListener('click', clearDataAndRefresh);
   stopBtn.addEventListener('click', stopCollection);
 
   // Debounced UI update for filter changes
@@ -204,9 +212,30 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (settings.winnerCount !== undefined) {
           winnerCountInput.value = settings.winnerCount;
         }
+        if (settings.followAccounts && settings.followAccounts.length > 0) {
+          restoreFollowAccounts(settings.followAccounts);
+        }
       }
     } catch (e) {
       console.error('Error loading state:', e);
+    }
+  }
+
+  function restoreFollowAccounts(accounts) {
+    // Clear existing inputs
+    const existingRows = followAccountsContainer.querySelectorAll('.follow-input-row');
+    existingRows.forEach((row, index) => {
+      if (index === 0) {
+        // Keep the first row, just clear it
+        row.querySelector('input').value = accounts[0] || '';
+      } else {
+        row.remove();
+      }
+    });
+
+    // Add additional rows for remaining accounts
+    for (let i = 1; i < accounts.length; i++) {
+      addFollowInput(accounts[i]);
     }
   }
 
@@ -239,7 +268,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             requireRetweet: reqRetweet.checked,
             requireLike: reqLike.checked,
             requireFollow: reqFollow.checked,
-            winnerCount: parseInt(winnerCountInput.value) || 1
+            winnerCount: parseInt(winnerCountInput.value) || 1,
+            followAccounts: getFollowAccounts()
           }
         });
       } catch (e) {
@@ -329,14 +359,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     winnersSection.classList.add('hidden');
   }
 
-  function addFollowInput() {
+  async function clearDataAndRefresh() {
+    await clearCollectedData();
+    await saveState();
+    updateUI();
+    showSuccess('Data cleared. Ready to collect again.');
+  }
+
+  function addFollowInput(initialValue = '') {
     const row = document.createElement('div');
     row.className = 'follow-input-row';
 
     const input = document.createElement('input');
     input.type = 'text';
-    input.placeholder = '@username';
+    input.placeholder = 'username';
     input.className = 'follow-input';
+    input.value = initialValue;
     input.setAttribute('aria-label', 'Account username to follow');
 
     const removeBtn = document.createElement('button');
@@ -588,6 +626,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       pickBtn.disabled = false;
       hideProgress();
+
+      if (state.winners.length === 0) {
+        showError('No winners found. None of the eligible participants follow the required accounts, or verification failed.');
+        return;
+      }
     } else {
       state.winners = shuffled.slice(0, count);
     }
@@ -598,15 +641,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Verify candidates follow required accounts and return verified winners
+  // Checks one at a time until we have enough winners (avoids unnecessary verification)
   async function verifyAndPickWinners(candidates, count, requiredAccounts) {
     const winners = [];
     const failed = [];
     const errors = [];
-    const maxToCheck = Math.min(candidates.length, count + 10); // Check up to 10 extra as backups
 
-    for (let i = 0; i < maxToCheck && winners.length < count; i++) {
+    for (let i = 0; i < candidates.length && winners.length < count; i++) {
       const candidate = candidates[i];
-      showProgress(`Verifying @${candidate.username} (${winners.length}/${count} winners, ${i + 1}/${maxToCheck} checked)...`);
+      showProgress(`Verifying @${candidate.username} (${winners.length}/${count} winners, checked ${i + 1})...`);
 
       try {
         const result = await checkUserFollows(candidate.username, requiredAccounts);
@@ -625,8 +668,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         errors.push({ username: candidate.username, error: e.message });
       }
 
-      // Small delay to avoid rate limiting
-      if (i < maxToCheck - 1) {
+      // Small delay between checks to avoid rate limiting
+      if (winners.length < count && i < candidates.length - 1) {
         await sleep(500);
       }
     }
@@ -649,17 +692,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Check if a user follows all required accounts
   // Returns { followsAll: boolean, results?: { account: boolean }, error?: string }
   async function checkUserFollows(username, requiredAccounts) {
-    // Get the user's following list by sending message to content script
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    try {
+      // Get the user's following list by sending message to content script
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      type: 'CHECK_FOLLOWS',
-      username: username,
-      requiredAccounts: requiredAccounts
-    });
+      if (!tab?.id) {
+        return { followsAll: false, error: 'No active Twitter tab found' };
+      }
 
-    // Return full response object for detailed error reporting
-    return response || { followsAll: false, error: 'No response from content script' };
+      const response = await chrome.tabs.sendMessage(tab.id, {
+        type: 'CHECK_FOLLOWS',
+        username: username,
+        requiredAccounts: requiredAccounts
+      });
+
+      // Return full response object for detailed error reporting
+      return response || { followsAll: false, error: 'No response from content script' };
+    } catch (e) {
+      return { followsAll: false, error: 'Content script unavailable: ' + e.message };
+    }
   }
 
   function sleep(ms) {
@@ -699,6 +750,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function displayWinners() {
     winnersList.innerHTML = '';
+
+    if (!state.winners || state.winners.length === 0) {
+      winnersSection.classList.add('hidden');
+      return;
+    }
 
     state.winners.forEach((winner, index) => {
       const item = document.createElement('div');

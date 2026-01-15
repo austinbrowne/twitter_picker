@@ -132,17 +132,6 @@
   // Start initialization
   initialize();
 
-  // Warn user before navigating away during collection
-  window.addEventListener('beforeunload', (event) => {
-    if (collectedData.isCollecting) {
-      // Standard way to show browser's default "are you sure?" dialog
-      event.preventDefault();
-      // Chrome requires returnValue to be set
-      event.returnValue = '';
-      return '';
-    }
-  });
-
   // Save data to storage (debounced with longer interval to reduce I/O)
   let saveTimeout = null;
   let lastSaveError = null;
@@ -404,7 +393,56 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  // Fetch with timeout to prevent hanging requests
+  // Make authenticated fetch through injected script (has Twitter's auth context)
+  const pendingRequests = new Map();
+
+  window.addEventListener('message', (event) => {
+    if (event.origin !== window.location.origin) return;
+    if (event.data?.type !== 'TWITTER_PICKER_FETCH_RESPONSE') return;
+
+    const { requestId, data, error } = event.data;
+    const pending = pendingRequests.get(requestId);
+    if (pending) {
+      pendingRequests.delete(requestId);
+      if (error) {
+        pending.reject(new Error(error));
+      } else {
+        pending.resolve(data);
+      }
+    }
+  });
+
+  async function authenticatedFetch(url, options = {}, timeout = 15000) {
+    console.log('[Twitter Picker Content] Sending authenticated fetch request');
+    const requestId = Math.random().toString(36).substring(2);
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        pendingRequests.delete(requestId);
+        reject(new Error('Request timed out'));
+      }, timeout);
+
+      pendingRequests.set(requestId, {
+        resolve: (data) => {
+          clearTimeout(timeoutId);
+          resolve(data);
+        },
+        reject: (err) => {
+          clearTimeout(timeoutId);
+          reject(err);
+        }
+      });
+
+      window.postMessage({
+        type: 'TWITTER_PICKER_FETCH_REQUEST',
+        requestId,
+        url,
+        options
+      }, window.location.origin);
+    });
+  }
+
+  // Fetch with timeout to prevent hanging requests (for non-auth requests)
   async function fetchWithTimeout(url, options = {}, timeout = 15000) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -582,10 +620,15 @@
         break;
 
       case 'CHECK_FOLLOWS':
+        console.log('[Twitter Picker Content] CHECK_FOLLOWS received for:', message.username);
         // Check if a user follows all required accounts
         if (!message.username || !Array.isArray(message.requiredAccounts)) {
           sendResponse({ followsAll: false, error: 'Invalid parameters' });
-          break;
+          return true;
+        }
+        if (message.requiredAccounts.length === 0) {
+          sendResponse({ followsAll: true, results: {} });
+          return true;
         }
         checkUserFollowsAccounts(message.username, message.requiredAccounts)
           .then(result => sendResponse(result))
@@ -601,8 +644,9 @@
   // Check if a user follows all the required accounts
   async function checkUserFollowsAccounts(username, requiredAccounts) {
     try {
-      // Fetch the user's following list using Twitter's internal API
-      const following = await fetchUserFollowing(username);
+      // Fetch the user's following list, stopping early once all required accounts are found
+      const requiredSet = new Set(requiredAccounts.map(a => a.toLowerCase()));
+      const following = await fetchUserFollowing(username, requiredSet);
       const followingSet = new Set(following.map(u => u.toLowerCase()));
 
       // Check if all required accounts are in their following list
@@ -624,27 +668,26 @@
     }
   }
 
-  // Fetch a user's following list using Twitter's GraphQL API
-  async function fetchUserFollowing(username) {
+  // Fetch a user's following list using Twitter's GraphQL API with pagination
+  // If requiredAccounts Set is provided, stops early once all are found
+  async function fetchUserFollowing(username, requiredAccounts = null, maxPages = 50) {
+    console.log('[Twitter Picker] fetchUserFollowing called for:', username);
+
     // First, get the user's ID
     const userInfo = await fetchUserByScreenName(username);
+    console.log('[Twitter Picker] Got user info:', userInfo?.rest_id ? 'success' : 'failed');
     if (!userInfo?.rest_id) {
       throw new Error('Could not find user: ' + username);
     }
 
     const userId = userInfo.rest_id;
     const following = [];
-
-    // Fetch following list (first page should be enough for verification)
-    // We only need to check if specific accounts are in their following,
-    // so fetching first ~100-200 should cover most cases
-    const variables = {
-      userId: userId,
-      count: 200,
-      includePromotedContent: false
-    };
+    let cursor = null;
+    const foundRequired = new Set();
 
     const features = {
+      hidden_profile_subscriptions_enabled: true,
+      hidden_profile_likes_enabled: true,
       rweb_tipjar_consumption_enabled: true,
       responsive_web_graphql_exclude_directive_enabled: true,
       verified_phone_label_enabled: false,
@@ -667,41 +710,159 @@
       rweb_video_timestamps_enabled: true,
       longform_notetweets_rich_text_read_enabled: true,
       longform_notetweets_inline_media_enabled: true,
-      responsive_web_enhance_cards_enabled: false
+      responsive_web_enhance_cards_enabled: false,
+      tweetypie_unmention_optimization_enabled: true,
+      responsive_web_media_download_video_enabled: true,
+      responsive_web_twitter_blue_verified_badge_is_enabled: true,
+      responsive_web_text_conversations_enabled: true,
+      responsive_web_twitter_article_data_v2_enabled: true,
+      blue_business_profile_image_shape_enabled: true,
+      profile_foundations_tweet_stats_enabled: true,
+      profile_foundations_tweet_stats_tweet_frequency: true,
+      responsive_web_birdwatch_note_limit_enabled: true,
+      interactive_text_enabled: true,
+      longform_notetweets_richtext_consumption_enabled: true,
+      responsive_web_home_pinned_timelines_enabled: true,
+      rweb_lists_timeline_redesign_enabled: true,
+      spaces_2022_h2_clipping: true,
+      spaces_2022_h2_spaces_communities: true
     };
 
-    const url = `https://x.com/i/api/graphql/PAnE9toEjRfE-4tozRcsfw/Following?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
+    // Paginate through following list (up to maxPages, but stop early if all required accounts found)
+    for (let page = 0; page < maxPages; page++) {
+      const variables = {
+        userId: userId,
+        count: 200,
+        includePromotedContent: false
+      };
 
-    const response = await fetchWithTimeout(url, {
-      credentials: 'include',
-      headers: {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'content-type': 'application/json',
-        'x-twitter-active-user': 'yes',
-        'x-twitter-auth-type': 'OAuth2Session',
-        'x-twitter-client-language': 'en'
+      // Add cursor for pagination (after first page)
+      if (cursor) {
+        variables.cursor = cursor;
       }
-    }, 15000);
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch following: ${response.status}`);
-    }
+      const url = `https://x.com/i/api/graphql/PAnE9toEjRfE-4tozRcsfw/Following?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
 
-    const data = await response.json();
+      // Use authenticated fetch through injected script (has Twitter's auth)
+      const data = await authenticatedFetch(url, {
+        headers: {
+          'accept': '*/*',
+          'content-type': 'application/json',
+          'x-twitter-active-user': 'yes',
+          'x-twitter-client-language': 'en'
+        }
+      }, 15000);
 
-    // Extract usernames from the response
-    const instructions = data?.data?.user?.result?.timeline?.timeline?.instructions || [];
-    for (const instruction of instructions) {
-      if (instruction.entries) {
-        for (const entry of instruction.entries) {
-          const userResult = entry?.content?.itemContent?.user_results?.result;
+      // Check for API errors
+      if (data?.errors?.length > 0) {
+        throw new Error(`Twitter API error: ${data.errors[0]?.message || 'Unknown error'}`);
+      }
+
+      // Extract usernames and cursor from the response
+      // Try multiple paths as Twitter's API structure can vary
+      const userResult = data?.data?.user?.result;
+      if (!userResult) {
+        throw new Error('Could not find user data in response');
+      }
+
+      const instructions =
+        userResult?.timeline_v2?.timeline?.instructions ||
+        userResult?.timeline?.instructions ||
+        userResult?.timeline?.timeline?.instructions ||
+        [];
+
+      // If first page returns no instructions, API structure may have changed
+      if (page === 0 && instructions.length === 0) {
+        console.error('[Twitter Picker] No instructions found in response. API structure may have changed.',
+          'Available keys:', userResult ? Object.keys(userResult) : 'null');
+        throw new Error('Could not parse following list - Twitter API may have changed');
+      }
+
+      let foundUsers = 0;
+      let nextCursor = null;
+
+      // Debug: Log first page structure
+      if (page === 0) {
+        console.log('[Twitter Picker] API Response structure:', {
+          hasInstructions: instructions.length,
+          instructionTypes: instructions.map(i => i.type),
+          firstInstruction: instructions[0] ? Object.keys(instructions[0]) : null
+        });
+      }
+
+      for (const instruction of instructions) {
+        // Handle different instruction types
+        const entries = instruction.entries || instruction.moduleItems || [];
+
+        // Debug: Log first instruction's entries
+        if (page === 0 && entries.length > 0) {
+          console.log('[Twitter Picker] First entry structure:', {
+            entryId: entries[0]?.entryId,
+            contentKeys: entries[0]?.content ? Object.keys(entries[0].content) : null,
+            sampleEntry: JSON.stringify(entries[0]).substring(0, 500)
+          });
+        }
+
+        for (const entry of entries) {
+          // Extract cursor for next page (try multiple paths)
+          if (entry.entryId?.startsWith('cursor-bottom') || entry.entryId?.includes('cursor-bottom')) {
+            nextCursor = entry.content?.value ||
+                        entry.content?.itemContent?.value ||
+                        entry.content?.cursorType && entry.content?.value;
+            continue;
+          }
+
+          // Extract user from entry (try multiple paths)
+          const userResult =
+            entry?.content?.itemContent?.user_results?.result ||
+            entry?.item?.itemContent?.user_results?.result ||
+            entry?.content?.userResult?.result;
+
+          let screenName = null;
           if (userResult?.legacy?.screen_name) {
-            following.push(userResult.legacy.screen_name);
-          } else if (userResult?.core?.screen_name) {
-            following.push(userResult.core.screen_name);
+            screenName = userResult.legacy.screen_name;
+          } else if (userResult?.core?.user_results?.result?.legacy?.screen_name) {
+            screenName = userResult.core.user_results.result.legacy.screen_name;
+          } else if (userResult?.screen_name) {
+            screenName = userResult.screen_name;
+          }
+
+          if (screenName) {
+            following.push(screenName);
+            foundUsers++;
+
+            // Track if this is a required account
+            if (requiredAccounts && requiredAccounts.has(screenName.toLowerCase())) {
+              foundRequired.add(screenName.toLowerCase());
+            }
           }
         }
+      }
+
+      // Debug: Log results for first page
+      if (page === 0) {
+        console.log('[Twitter Picker] First page results:', {
+          foundUsers,
+          nextCursor: nextCursor ? 'found' : 'not found',
+          sampleUsers: following.slice(0, 3)
+        });
+      }
+
+      // Stop early if we found all required accounts
+      if (requiredAccounts && foundRequired.size === requiredAccounts.size) {
+        break;
+      }
+
+      // Stop if no more users or no next cursor
+      if (foundUsers === 0 || !nextCursor) {
+        break;
+      }
+
+      cursor = nextCursor;
+
+      // Small delay between pages to avoid rate limiting
+      if (page < maxPages - 1) {
+        await sleep(300);
       }
     }
 
@@ -717,6 +878,7 @@
 
     const features = {
       hidden_profile_subscriptions_enabled: true,
+      hidden_profile_likes_enabled: true,
       rweb_tipjar_consumption_enabled: true,
       responsive_web_graphql_exclude_directive_enabled: true,
       verified_phone_label_enabled: false,
@@ -727,7 +889,30 @@
       subscriptions_feature_can_gift_premium: true,
       creator_subscriptions_tweet_preview_api_enabled: true,
       responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
-      responsive_web_graphql_timeline_navigation_enabled: true
+      responsive_web_graphql_timeline_navigation_enabled: true,
+      tweetypie_unmention_optimization_enabled: true,
+      responsive_web_media_download_video_enabled: true,
+      responsive_web_twitter_blue_verified_badge_is_enabled: true,
+      responsive_web_text_conversations_enabled: true,
+      responsive_web_twitter_article_data_v2_enabled: true,
+      blue_business_profile_image_shape_enabled: true,
+      profile_foundations_tweet_stats_enabled: true,
+      profile_foundations_tweet_stats_tweet_frequency: true,
+      responsive_web_birdwatch_note_limit_enabled: true,
+      interactive_text_enabled: true,
+      longform_notetweets_richtext_consumption_enabled: true,
+      responsive_web_home_pinned_timelines_enabled: true,
+      freedom_of_speech_not_reach_fetch_enabled: true,
+      graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+      view_counts_everywhere_api_enabled: true,
+      longform_notetweets_consumption_enabled: true,
+      longform_notetweets_rich_text_read_enabled: true,
+      longform_notetweets_inline_media_enabled: true,
+      responsive_web_enhance_cards_enabled: false,
+      responsive_web_edit_tweet_api_enabled: true,
+      standardized_nudges_misinfo: true,
+      rweb_lists_timeline_redesign_enabled: true,
+      c9s_tweet_anatomy_moderator_badge_enabled: true
     };
 
     const fieldToggles = {
@@ -736,23 +921,16 @@
 
     const url = `https://x.com/i/api/graphql/xc8f1g7BYqr6VTzTbvNlGw/UserByScreenName?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}&fieldToggles=${encodeURIComponent(JSON.stringify(fieldToggles))}`;
 
-    const response = await fetchWithTimeout(url, {
-      credentials: 'include',
+    // Use authenticated fetch through injected script (has Twitter's auth)
+    const data = await authenticatedFetch(url, {
       headers: {
         'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
         'content-type': 'application/json',
         'x-twitter-active-user': 'yes',
-        'x-twitter-auth-type': 'OAuth2Session',
         'x-twitter-client-language': 'en'
       }
     }, 15000);
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch user: ${response.status}`);
-    }
-
-    const data = await response.json();
     return data?.data?.user?.result;
   }
 

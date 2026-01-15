@@ -450,19 +450,19 @@
         <span class="requirement-status status-idle" id="status-like">Not collected</span>
       </div>
 
-      <div class="requirement-row" style="flex-direction: column; align-items: stretch;">
+      <div class="requirement-row" style="flex-direction: column; align-items: stretch; border-top: 1px solid #eff3f4; padding-top: 12px; margin-top: 4px;">
         <label class="requirement-label" style="margin-bottom: 8px;">
           <input type="checkbox" id="req-follow">
-          Must Follow (verified when picking)
+          Verify Follow (checked when picking)
         </label>
+        <div style="font-size: 11px; color: #536471; margin-bottom: 8px;">Only pick winners who follow these accounts:</div>
         <div class="follow-accounts" id="follow-accounts">
           <div class="follow-input-row">
-            <input type="text" placeholder="@username" class="follow-input">
+            <input type="text" placeholder="username" class="follow-input">
             <button class="btn btn-secondary remove-follow">×</button>
           </div>
         </div>
         <span class="add-account-btn" id="add-follow-btn">+ Add another</span>
-        <div style="font-size: 11px; color: #536471; margin-top: 4px;">Winners will be verified to follow these accounts</div>
       </div>
 
       <details style="margin: 12px 0;">
@@ -489,6 +489,7 @@
 
       <div class="collect-btn-row">
         <button class="btn btn-primary" id="collect-all-btn" aria-label="Start collecting data from Twitter">Collect All Data</button>
+        <button class="btn btn-secondary" id="clear-data-btn" aria-label="Clear collected data for this tweet">Clear Data</button>
       </div>
 
       <div id="progress-info" class="progress-info hidden" role="status" aria-live="polite">
